@@ -1,0 +1,24 @@
+tracker:
+  smooth_window_len: 5
+  max_miss: 5
+  static_frame_count: 3
+  static_penalty: 120.0
+  fast_speed_thresh: 100.0
+  lambda_slow: 0.85
+  lambda_fast: 0.65
+  grid_size: 10
+  dynamic_gain: 2.0
+  dynamic_min_thresh: 60.0
+  dynamic_max_thresh: 320.0
+
+ransac:
+  min_samples: 5
+  max_iter: 80
+  residual_thresh: 12
+
+detector:
+  conf_min: 0.12
+  yolo_conf: 0.18
+  max_box_area_ratio: 0.004
+  max_aspect_ratio: 4.0
+  roi_padding_ratio: 0.08

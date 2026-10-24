@@ -1,0 +1,42 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+env*/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 大文件，绝对不要上传
+weights/
+outputs/
+datasets/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.png
+*.jpg
+*.jpeg
+
+# 日志
+*.log
+logs/
+
+# 配置本地覆盖（如果以后用）
+configs/local_override.yaml
+
+# AI分析生成内容
+_probe/
+docs/
