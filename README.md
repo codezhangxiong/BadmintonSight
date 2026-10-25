@@ -71,7 +71,7 @@ outputs/track_20260101_120000.clean.csv    清洗后的轨迹点
 | 列 | 含义 |
 |---|---|
 | `frame` | 视频帧号（1-based，与日志一致） |
-| `segment_id` | 所属轨迹段编号 |
+| `segment_id` | 当前**活跃**轨迹段编号；段外帧（首个观测之前、清段之后的丢帧）为空 |
 | `event` | `obs` / `rejected` / `miss` |
 | `obs_x`,`obs_y` | 原始观测坐标（像素，被拒帧也会记录，便于复盘门控） |
 | `smooth_x`,`smooth_y` | 平滑后轨迹点（仅 `obs` 行有值） |
@@ -91,7 +91,8 @@ outputs/track_20260101_120000.clean.csv    清洗后的轨迹点
 | `n_cleaned` | RANSAC 清洗后保留点数 |
 | `first_x..last_y` | 段首尾坐标 |
 
-`n_raw <= ransac.min_samples` 的短段不做清洗，`n_cleaned = n_raw`，仍会写入（旧版本会静默丢弃）。
+`n_raw <= ransac.min_samples` 的短段**不做清洗**，按原样保留（`n_cleaned = n_raw`），仍会写入；
+更长段才跑 RANSAC 抛物线清洗。旧版本对短段也会清洗、且清洗结果不落盘（短段可能被清成 0 点）。
 
 ### `<stem>.clean.csv` — 清洗后轨迹
 
@@ -103,7 +104,9 @@ outputs/track_20260101_120000.clean.csv    清洗后的轨迹点
 python -m unittest discover -s tests -t .
 ```
 
-覆盖 `detector` 过滤与空输入、`cleaner` 的 mask 契约、`export` 的 CSV 落盘格式。无第三方测试依赖。
+覆盖 `detector` 的过滤/空输入、`cleaner` 的 mask 契约、`pipeline._clean_segment` 的短段清洗契约、`export` 的 CSV 落盘格式。
+测试框架只用标准库 `unittest`（不依赖 pytest），测试代码会用到项目已有的 numpy。
+端到端视频流程需要权重与 GPU，未纳入单元测试，按上面的"运行"章节手动验证。
 
 ## 配置
 

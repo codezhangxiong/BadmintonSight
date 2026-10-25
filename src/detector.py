@@ -59,8 +59,9 @@ def extract_shuttlecock_candidates(yolo_boxes, frame_shape, cfg, roi_corners=Non
             {
                 "point": pt,
                 "confidence": float(conf),
-                "area_ratio": float(area_ratio),
-                "aspect_ratio": float(ar),
+                # 保持基线类型（np.float32），不在热路径上引入未声明的类型变化
+                "area_ratio": area_ratio,
+                "aspect_ratio": ar,
                 # 以下字段用于轨迹落盘与后续调试，不影响既有过滤/关联逻辑
                 "bbox": (
                     int(cx - bw / 2),

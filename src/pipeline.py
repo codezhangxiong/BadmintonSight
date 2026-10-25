@@ -19,7 +19,13 @@ def _clean_segment(points, frames, ransac_cfg):
 
     返回 (cleaned_points, cleaned_frames, mask)。mask 与输入等长且保序，
     因此可以直接用布尔掩码把内点映射回原始帧号。
+
+    点数 <= min_samples 的短段**不做清洗**：RANSAC 至少需要 min_samples 个点，
+    对恰好等量的输入没有冗余度，可能把整段判成离群而清空（实测 5 点含 1 个离群 → 0 点）。
+    短段按原样返回，保证 segments.csv 的 n_cleaned == n_raw 契约成立。
     """
+    if len(points) <= int(ransac_cfg["min_samples"]):
+        return list(points), list(frames), np.ones(len(points), dtype=bool)
     cleaned, mask = ransac_clean_parabola(
         points,
         min_samples=ransac_cfg["min_samples"],
@@ -73,7 +79,7 @@ def run_pipeline(video_path, out_path, cfg, show_gui=True, limit=None, save_traj
             f"无法创建输出视频（检查编码器 mp4v 是否可用、路径是否有写权限）: {out_path}"
         )
 
-    recorder = TrajectoryRecorder(out_path, enabled=save_traj)
+    recorder = None
 
     track_cfg = cfg["tracker"]
     ransac_cfg = cfg["ransac"]
@@ -91,45 +97,52 @@ def run_pipeline(video_path, out_path, cfg, show_gui=True, limit=None, save_traj
     missed = 0
     last_frame = 0
     segment_id = 0
+    active_segment_id = None  # None 表示当前帧不属于任何活跃轨迹段（段外丢帧）
     segments = []
 
     def finalize_segment(end_frame):
-        """结束当前轨迹段：清洗、落盘、清空缓冲。"""
-        nonlocal segment_id
-        if full_traj:
-            raw = list(full_traj)
-            raw_frames = list(full_traj_frames)
-            cleaned, cleaned_frames, _ = _clean_segment(raw, raw_frames, ransac_cfg)
-            if len(raw) > ransac_cfg["min_samples"]:
-                print(f"\n==== trajectory end, raw len: {len(raw)} ====")
-                print(f"==== cleaned len: {len(cleaned)} ====\n")
-            segments.append(
-                {
-                    "segment_id": segment_id,
-                    # 起止帧取"实际有观测的帧"，与轨迹点范围一致，便于和视频帧对齐
-                    "start_frame": raw_frames[0] if raw_frames else end_frame,
-                    "end_frame": raw_frames[-1] if raw_frames else end_frame,
-                    "n_raw": len(raw),
-                    "n_cleaned": len(cleaned),
-                    "first_x": raw[0][0],
-                    "first_y": raw[0][1],
-                    "last_x": raw[-1][0],
-                    "last_y": raw[-1][1],
-                }
-            )
-            recorder.add_segment(segments[-1])
-            if cleaned_frames:
-                recorder.add_clean_points(
-                    segment_id, [(f, p[0], p[1]) for f, p in zip(cleaned_frames, cleaned)]
-                )
-            else:
-                recorder.add_clean_flat(segment_id, cleaned)
-            segment_id += 1
+        """结束当前轨迹段：取走缓冲、清洗、落盘。
+
+        先把缓冲搬空再清洗/写盘：即使清洗或写盘抛异常，finally 里也不会把同一段
+        重复记录一次（幂等）。
+        """
+        nonlocal segment_id, active_segment_id
+        raw = list(full_traj)
+        raw_frames = list(full_traj_frames)
         full_traj.clear()
         full_traj_frames.clear()
         smooth_win.clear()
+        if not raw:
+            return
+        cleaned, cleaned_frames, _ = _clean_segment(raw, raw_frames, ransac_cfg)
+        if len(raw) > ransac_cfg["min_samples"]:
+            print(f"\n==== trajectory end, raw len: {len(raw)} ====")
+            print(f"==== cleaned len: {len(cleaned)} ====\n")
+        segment = {
+            "segment_id": segment_id,
+            # 起止帧取"实际有观测的帧"，与轨迹点范围一致，便于和视频帧对齐
+            "start_frame": raw_frames[0] if raw_frames else end_frame,
+            "end_frame": raw_frames[-1] if raw_frames else end_frame,
+            "n_raw": len(raw),
+            "n_cleaned": len(cleaned),
+            "first_x": raw[0][0],
+            "first_y": raw[0][1],
+            "last_x": raw[-1][0],
+            "last_y": raw[-1][1],
+        }
+        segments.append(segment)
+        recorder.add_segment(segment)
+        if cleaned_frames:
+            recorder.add_clean_points(
+                segment_id, [(f, p[0], p[1]) for f, p in zip(cleaned_frames, cleaned)]
+            )
+        else:
+            recorder.add_clean_flat(segment_id, cleaned)
+        segment_id += 1
+        active_segment_id = None
 
     try:
+        recorder = TrajectoryRecorder(out_path, enabled=save_traj)
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -190,7 +203,7 @@ def run_pipeline(video_path, out_path, cfg, show_gui=True, limit=None, save_traj
                     print(f"[Frame {fid}] OBS {obs_pt} outlier drop")
                     recorder.add_frame(
                         fid,
-                        segment_id,
+                        active_segment_id,
                         "rejected",
                         obs=obs_pt,
                         candidate=best,
@@ -200,6 +213,8 @@ def run_pipeline(video_path, out_path, cfg, show_gui=True, limit=None, save_traj
                 else:
                     missing = 0
                     accepted += 1
+                    if active_segment_id is None:
+                        active_segment_id = segment_id
                     smooth_win.append(np.array(obs_pt))
                     arr = np.array(list(smooth_win))
                     smooth_pt = tuple(np.mean(arr, axis=0))
@@ -208,7 +223,7 @@ def run_pipeline(video_path, out_path, cfg, show_gui=True, limit=None, save_traj
                     print(f"[Frame {fid}] obs {obs_pt}, smooth {np.round(smooth_pt, 1)}")
                     recorder.add_frame(
                         fid,
-                        segment_id,
+                        active_segment_id,
                         "obs",
                         obs=obs_pt,
                         smooth=smooth_pt,
@@ -220,7 +235,7 @@ def run_pipeline(video_path, out_path, cfg, show_gui=True, limit=None, save_traj
                 missing += 1
                 missed += 1
                 print(f"[Frame {fid}] no obs, missing={missing}")
-                recorder.add_frame(fid, segment_id, "miss")
+                recorder.add_frame(fid, active_segment_id, "miss")
 
             if smooth_pt is not None:
                 cv2.circle(frame, (int(smooth_pt[0]), int(smooth_pt[1])), 6, (0, 0, 255), -1)
@@ -236,14 +251,18 @@ def run_pipeline(video_path, out_path, cfg, show_gui=True, limit=None, save_traj
                 finalize_segment(fid)
                 missing = 0
     finally:
-        # 视频结束 / 按 q 退出时，最后一段此前不会触发清洗，这里补上，避免轨迹丢失
-        if full_traj:
-            finalize_segment(last_frame)
-        recorder.close()
-        cap.release()
-        out.release()
-        if show_gui:
-            cv2.destroyAllWindows()
+        # 视频结束 / 按 q 退出时，最后一段此前不会触发清洗，这里补上，避免轨迹丢失。
+        # 嵌套 try/finally：即使收尾清洗抛异常，也必须释放 recorder / cap / out / 窗口。
+        try:
+            if full_traj:
+                finalize_segment(last_frame)
+        finally:
+            if recorder is not None:
+                recorder.close()
+            cap.release()
+            out.release()
+            if show_gui:
+                cv2.destroyAllWindows()
 
     summary = {
         "out_path": out_path,
@@ -254,5 +273,6 @@ def run_pipeline(video_path, out_path, cfg, show_gui=True, limit=None, save_traj
         "miss": missed,
         "segments": segments,
     }
-    summary.update(recorder.summary())
+    if recorder is not None:
+        summary.update(recorder.summary())
     return summary

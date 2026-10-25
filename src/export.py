@@ -90,9 +90,23 @@ class TrajectoryRecorder:
     # ------------------------------------------------------------------ open/close
     def _open(self):
         os.makedirs(os.path.dirname(self.traj_path) or ".", exist_ok=True)
-        self._traj_file = open(self.traj_path, "w", newline="", encoding="utf-8")
-        self._seg_file = open(self.segments_path, "w", newline="", encoding="utf-8")
-        self._clean_file = open(self.clean_path, "w", newline="", encoding="utf-8")
+        opened = []
+        try:
+            self._traj_file = open(self.traj_path, "w", newline="", encoding="utf-8")
+            opened.append(self._traj_file)
+            self._seg_file = open(self.segments_path, "w", newline="", encoding="utf-8")
+            opened.append(self._seg_file)
+            self._clean_file = open(self.clean_path, "w", newline="", encoding="utf-8")
+            opened.append(self._clean_file)
+        except Exception:
+            # 部分打开失败时把已打开的句柄关掉，避免泄漏
+            for fh in opened:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+            self._traj_file = self._seg_file = self._clean_file = None
+            raise
         self._traj_writer = csv.DictWriter(self._traj_file, fieldnames=TRAJ_FIELDS)
         self._seg_writer = csv.DictWriter(self._seg_file, fieldnames=SEGMENT_FIELDS)
         self._clean_writer = csv.DictWriter(self._clean_file, fieldnames=CLEAN_FIELDS)
@@ -103,11 +117,16 @@ class TrajectoryRecorder:
     def close(self):
         if self._closed:
             return
-        self._closed = True
-        for fh in (self._traj_file, self._seg_file, self._clean_file):
-            if fh is not None:
-                fh.close()
+        # 先摘下引用再关闭：单个文件关闭失败不会阻止其余文件关闭，且 close 保持幂等
+        files = (self._traj_file, self._seg_file, self._clean_file)
         self._traj_file = self._seg_file = self._clean_file = None
+        self._closed = True
+        for fh in files:
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
 
     def __enter__(self):
         return self
