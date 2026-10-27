@@ -17,11 +17,12 @@ FrameRecord 必须记录**复刻原单遍渲染所需的全部数据**，否则�
 
 import json
 import os
+import time
 from collections import deque
 from dataclasses import dataclass, field
 
+import cv2
 import numpy as np
-from ultralytics import YOLO
 
 from src.detector import extract_shuttlecock_candidates
 from src.export import TrajectoryRecorder
@@ -30,8 +31,6 @@ from src.tracker.association import mark_static_candidates, select_best_candidat
 from src.tracker.cleaner import ransac_clean_parabola
 from src.tracker.predictor import dynamic_step_threshold, predict_linear
 from utils.common import distance
-
-import cv2
 
 # 渲染阶段固定使用的历史点上限，必须与画图端 draw_fade_points(max_keep=30) 一致
 TRAIL_MAX_KEEP = 30
@@ -208,7 +207,22 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
 
     返回 AnalysisResult。
     """
+    # 延迟导入 ultralytics：它会连锁加载 torch 及 CUDA 动态库（本机实测约 2.2s）。
+    # 只有真正要跑检测时才需要这笔开销；--render-from 走渲染路径，不应为它付启动成本。
+    from ultralytics import YOLO
+
+    t_start = time.perf_counter()
+    if verbose:
+        # 进度提示走 stdout（数据输出本来就是逐帧日志；stderr 在 Windows PowerShell
+        # 下会被渲染成红色错误块，容易误解为报错）
+        print(f"[分析] 加载 YOLO 权重: {cfg['model_path']}", flush=True)
     model = YOLO(cfg["model_path"])
+    if verbose:
+        print(
+            f"[分析] 权重加载完成（{time.perf_counter() - t_start:.2f}s）；"
+            "正在初始化 CUDA 并执行首帧推理（首次约 3~5 秒）...",
+            flush=True,
+        )
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -296,6 +310,11 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
             fid = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
             last_frame = fid
             results = model(frame, conf=cfg["detector"]["yolo_conf"], verbose=False)[0]
+            if verbose and processed == 1:
+                print(
+                    f"[分析] 初始化完成（累计 {time.perf_counter() - t_start:.2f}s），开始逐帧处理",
+                    flush=True,
+                )
 
             raw_boxes = _collect_raw_boxes(results.boxes)
 
