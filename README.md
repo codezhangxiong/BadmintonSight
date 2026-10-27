@@ -38,25 +38,29 @@ python scripts/run_track.py --video videos/badminton.mp4 --weights weights/yolo1
 # 只跑前 100 帧做调试
 python scripts/run_track.py --video videos/badminton.mp4 --weights weights/yolo11s-ball.pt --no-gui --limit 100
 
-# 两阶段用法（跟踪已拆成"先分析、再渲染"两遍扫描）
-# ① 只分析：产出 3 个 CSV + analysis.json，不生成视频（约 16s）
+# 三段式局部运行（采集 → 段处理 → 渲染）
+# ① 只采集 + 段处理：产出 3 个 CSV + analysis.json，不生成视频（约 18s）
 python scripts/run_track.py --video videos/badminton.mp4 --weights weights/yolo11s-ball.pt \
     --output outputs/run.mp4 --analyze-only --no-gui
-# ② 只渲染：复用上一步的 analysis.json，跳过 YOLO（约 24s，可反复重跑调试视觉）
+# ② 只重做段处理：调 max_miss / ransac 参数后重算分段与清洗（约 0.5s，不加载 YOLO）
+python scripts/run_track.py --segments-from outputs/run.analysis.json \
+    --output outputs/run.mp4 --config configs/track_cfg.yaml
+# ③ 只渲染：复用 analysis.json 重放视觉层（约 24s，不加载 YOLO）
 python scripts/run_track.py --video videos/badminton.mp4 \
     --output outputs/run.mp4 --render-from outputs/run.analysis.json --no-gui
 ```
 
-**两阶段结构**（默认行为不变，一条命令仍是"分析 → 渲染"）：
+**三段式结构**（默认行为不变，一条命令仍是"采集 → 段处理 → 渲染"）：
 
 | 阶段 | 模块 | 做什么 | 产物 |
 |---|---|---|---|
-| 分析 | `src/analysis.py` `analyze_video()` | YOLO 检测、候选/静态标记、关联、门控、分段、RANSAC | CSV + `AnalysisResult`（可存 JSON） |
-| 渲染 | `src/render.py` `render_video()` | 只按分析快照重放视觉层并写 mp4 | 视频 |
+| 采集 | `src/analysis.py` `analyze_video()` | 逐帧 YOLO 检测、候选/静态标记、关联、门控、平滑；只记录，不做段处理 | `traj.csv` + `AnalysisResult`（可存 JSON） |
+| 段处理 | `src/segments.py` `process_segments()` | 离线切段（连续丢帧规则）、RANSAC 清洗 | `segments.csv` + `clean.csv` |
+| 渲染 | `src/render.py` `render_video()` | 只按帧快照重放视觉层并写 mp4 | 视频 |
 
-好处：改渲染（配色、标注、慢动作）不用重跑 YOLO；后续接入 Kalman/批优化时，分析阶段可以直接变成"两遍扫描"的第一遍。
+好处：段处理只依赖采集结果，**调分段/清洗参数不必重跑 YOLO**（实测 0.49s 重算全片分段）；改渲染（配色、标注、慢动作）同样只需重跑渲染阶段；后续接入 Kalman/批优化时，可以在段处理阶段做回溯优化而不动采集循环。
 
-启动耗时：首次跑检测约 **5 秒**才出第一帧（`import torch` 装载 CUDA 库约 2.2s + 首次 CUDA/cuDNN 初始化约 2.4s，与权重大小无关），期间会打印 `[分析] ...` 进度提示。`--render-from` 只渲染模式**不加载 YOLO**，启动约 0.2 秒。
+启动耗时：首次跑检测约 **5 秒**才出第一帧（`import torch` 装载 CUDA 库约 2.2s + 首次 CUDA/cuDNN 初始化约 2.4s，与权重大小无关），期间会打印 `[采集] ...` 进度提示。`--render-from` / `--segments-from` 都**不加载 YOLO**，启动约 0.2 秒。
 
 - 可从**任意工作目录**调用（脚本会自动定位项目根），不再需要设置 `PYTHONPATH`。
 - 相对路径一律以**项目根**为基准解析。
@@ -65,13 +69,14 @@ python scripts/run_track.py --video videos/badminton.mp4 \
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--config` | `configs/track_cfg.yaml` | 配置文件 |
-| `--video` | 必填 | 输入视频 |
-| `--weights` | 必填 | YOLO 权重（`--render-from` 模式可省略） |
+| `--video` | 必填 | 输入视频（`--segments-from` 模式可省略） |
+| `--weights` | 必填 | YOLO 权重（`--render-from` / `--segments-from` 模式可省略） |
 | `--output` | `outputs/track_<时间戳>.mp4` | 输出视频（`--analyze-only` 时只用作 CSV/JSON 命名基准） |
 | `--no-gui` | 关 | 不弹 OpenCV 窗口 |
 | `--no-traj` | 关 | 不写轨迹 CSV |
 | `--limit` | 全部 | 只处理前 N 帧 |
-| `--analyze-only` | 关 | 只跑分析阶段，写 CSV + analysis.json |
+| `--analyze-only` | 关 | 只跑采集 + 段处理，写 CSV + analysis.json |
+| `--segments-from` | 空 | 从 analysis.json 重做段处理（只写 CSV，跳过 YOLO） |
 | `--render-from` | 空 | 从已有 analysis.json 渲染（跳过 YOLO） |
 | `--analysis-json` | 空 | 另存分析结果 JSON；`--analyze-only` 默认 `<输出主干>.analysis.json` |
 

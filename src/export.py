@@ -1,10 +1,15 @@
 """轨迹与分段结果的 CSV 导出。
 
-pipeline 跑完一段视频后，除可视化 mp4 之外还会写出三份 sidecar CSV（与输出视频同名 stem）：
+三段式流程里，三份 sidecar CSV（与输出视频同名 stem）由不同阶段写出：
 
-    <stem>.traj.csv      逐帧事件表：obs（接受）/ rejected（被判离群）/ miss（无观测）
-    <stem>.segments.csv  每段轨迹汇总：起止帧、清洗前后点数、首尾点
-    <stem>.clean.csv     每段清洗后的 (frame, x, y)，RANSAC 内点按原始顺序输出
+    <stem>.traj.csv      逐帧事件表（采集阶段写：obs / rejected / miss）
+    <stem>.segments.csv  每段轨迹汇总（段处理阶段写）
+    <stem>.clean.csv     每段清洗后的 (frame, x, y)（段处理阶段写）
+
+对应三个写入器：
+    FrameRecorder     → traj.csv
+    SegmentRecorder   → segments.csv + clean.csv
+    TrajectoryRecorder→ 三份一起写（向后兼容旧调用方，内部组合上面两个）
 
 设计约束：
 - 只依赖标准库，不 import cv2 / ultralytics，方便单元测试与复用；
@@ -48,6 +53,12 @@ SEGMENT_FIELDS = [
 CLEAN_FIELDS = ["segment_id", "frame", "x", "y"]
 
 
+def _sidecar_path(out_path, kind):
+    """按输出视频的目录 + 主干生成 sidecar 路径，例如 foo.mp4 → foo.traj.csv。"""
+    stem = os.path.splitext(os.path.abspath(out_path))[0]
+    return f"{stem}.{kind}.csv"
+
+
 def _fmt(value, digits=2):
     """把数字/布尔/None 统一格式化成 CSV 单元格，避免科学计数法。"""
     if value is None:
@@ -68,65 +79,35 @@ def _as_xy(point):
     return point[0], point[1]
 
 
-class TrajectoryRecorder:
-    """逐帧事件 + 分段汇总 + 清洗后轨迹的 CSV 写入器。"""
+class FrameRecorder:
+    """逐帧事件表写入器（<stem>.traj.csv），采集阶段使用。"""
 
     def __init__(self, out_path, enabled=True):
         self.enabled = enabled
-        stem = os.path.splitext(os.path.abspath(out_path))[0]
-        self.traj_path = f"{stem}.traj.csv"
-        self.segments_path = f"{stem}.segments.csv"
-        self.clean_path = f"{stem}.clean.csv"
-        self._traj_file = None
-        self._seg_file = None
-        self._clean_file = None
-        self._traj_writer = None
-        self._seg_writer = None
-        self._clean_writer = None
+        self.traj_path = _sidecar_path(out_path, "traj")
+        self._file = None
+        self._writer = None
         self._closed = False
         if self.enabled:
             self._open()
 
-    # ------------------------------------------------------------------ open/close
     def _open(self):
         os.makedirs(os.path.dirname(self.traj_path) or ".", exist_ok=True)
-        opened = []
-        try:
-            self._traj_file = open(self.traj_path, "w", newline="", encoding="utf-8")
-            opened.append(self._traj_file)
-            self._seg_file = open(self.segments_path, "w", newline="", encoding="utf-8")
-            opened.append(self._seg_file)
-            self._clean_file = open(self.clean_path, "w", newline="", encoding="utf-8")
-            opened.append(self._clean_file)
-        except Exception:
-            # 部分打开失败时把已打开的句柄关掉，避免泄漏
-            for fh in opened:
-                try:
-                    fh.close()
-                except Exception:
-                    pass
-            self._traj_file = self._seg_file = self._clean_file = None
-            raise
-        self._traj_writer = csv.DictWriter(self._traj_file, fieldnames=TRAJ_FIELDS)
-        self._seg_writer = csv.DictWriter(self._seg_file, fieldnames=SEGMENT_FIELDS)
-        self._clean_writer = csv.DictWriter(self._clean_file, fieldnames=CLEAN_FIELDS)
-        self._traj_writer.writeheader()
-        self._seg_writer.writeheader()
-        self._clean_writer.writeheader()
+        self._file = open(self.traj_path, "w", newline="", encoding="utf-8")
+        self._writer = csv.DictWriter(self._file, fieldnames=TRAJ_FIELDS)
+        self._writer.writeheader()
 
     def close(self):
         if self._closed:
             return
-        # 先摘下引用再关闭：单个文件关闭失败不会阻止其余文件关闭，且 close 保持幂等
-        files = (self._traj_file, self._seg_file, self._clean_file)
-        self._traj_file = self._seg_file = self._clean_file = None
+        fh = self._file
+        self._file = None
         self._closed = True
-        for fh in files:
-            if fh is not None:
-                try:
-                    fh.close()
-                except Exception:
-                    pass
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:
+                pass
 
     def __enter__(self):
         return self
@@ -135,7 +116,6 @@ class TrajectoryRecorder:
         self.close()
         return False
 
-    # ------------------------------------------------------------------ rows
     def add_frame(
         self,
         frame,
@@ -150,7 +130,7 @@ class TrajectoryRecorder:
         """记录一帧事件。
 
         frame       视频帧号（与日志一致，1-based）
-        segment_id  当前轨迹段编号；无段时为最后一次分配的编号
+        segment_id  当前活跃段编号；段外帧传 None → CSV 留空
         event       "obs" | "rejected" | "miss"
         obs         原始观测坐标 (x, y)，无观测传 None
         smooth      平滑后轨迹点 (x, y)，仅 event="obs" 时有值
@@ -162,7 +142,7 @@ class TrajectoryRecorder:
         obs_x, obs_y = _as_xy(obs)
         smooth_x, smooth_y = _as_xy(smooth)
         bbox = candidate.get("bbox") or (None, None, None, None)
-        self._traj_writer.writerow(
+        self._writer.writerow(
             {
                 "frame": frame,
                 "segment_id": segment_id,
@@ -181,6 +161,67 @@ class TrajectoryRecorder:
                 "threshold": _fmt(threshold),
             }
         )
+
+    def summary(self):
+        return {"traj_csv": self.traj_path if self.enabled else ""}
+
+
+class SegmentRecorder:
+    """分段汇总 + 清洗轨迹写入器（<stem>.segments.csv / <stem>.clean.csv），段处理阶段使用。"""
+
+    def __init__(self, out_path, enabled=True):
+        self.enabled = enabled
+        self.segments_path = _sidecar_path(out_path, "segments")
+        self.clean_path = _sidecar_path(out_path, "clean")
+        self._seg_file = None
+        self._clean_file = None
+        self._seg_writer = None
+        self._clean_writer = None
+        self._closed = False
+        if self.enabled:
+            self._open()
+
+    def _open(self):
+        os.makedirs(os.path.dirname(self.segments_path) or ".", exist_ok=True)
+        opened = []
+        try:
+            self._seg_file = open(self.segments_path, "w", newline="", encoding="utf-8")
+            opened.append(self._seg_file)
+            self._clean_file = open(self.clean_path, "w", newline="", encoding="utf-8")
+            opened.append(self._clean_file)
+        except Exception:
+            # 部分打开失败时把已打开的句柄关掉，避免泄漏
+            for fh in opened:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+            self._seg_file = self._clean_file = None
+            raise
+        self._seg_writer = csv.DictWriter(self._seg_file, fieldnames=SEGMENT_FIELDS)
+        self._clean_writer = csv.DictWriter(self._clean_file, fieldnames=CLEAN_FIELDS)
+        self._seg_writer.writeheader()
+        self._clean_writer.writeheader()
+
+    def close(self):
+        if self._closed:
+            return
+        files = (self._seg_file, self._clean_file)
+        self._seg_file = self._clean_file = None
+        self._closed = True
+        for fh in files:
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
 
     def add_segment(self, segment):
         """记录一段轨迹的汇总信息。"""
@@ -228,10 +269,58 @@ class TrajectoryRecorder:
                 }
             )
 
-    # ------------------------------------------------------------------ info
     def summary(self):
         return {
-            "traj_csv": self.traj_path if self.enabled else "",
             "segments_csv": self.segments_path if self.enabled else "",
             "clean_csv": self.clean_path if self.enabled else "",
         }
+
+
+class TrajectoryRecorder:
+    """三份 CSV 一起写的组合写入器（向后兼容旧调用方）。"""
+
+    def __init__(self, out_path, enabled=True):
+        self.enabled = enabled
+        self._frames = FrameRecorder(out_path, enabled)
+        self._segments = SegmentRecorder(out_path, enabled)
+
+    @property
+    def traj_path(self):
+        return self._frames.traj_path
+
+    @property
+    def segments_path(self):
+        return self._segments.segments_path
+
+    @property
+    def clean_path(self):
+        return self._segments.clean_path
+
+    def add_frame(self, *args, **kwargs):
+        self._frames.add_frame(*args, **kwargs)
+
+    def add_segment(self, *args, **kwargs):
+        self._segments.add_segment(*args, **kwargs)
+
+    def add_clean_points(self, *args, **kwargs):
+        self._segments.add_clean_points(*args, **kwargs)
+
+    def add_clean_flat(self, *args, **kwargs):
+        self._segments.add_clean_flat(*args, **kwargs)
+
+    def close(self):
+        self._frames.close()
+        self._segments.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
+
+    def summary(self):
+        out = {}
+        out.update(self._frames.summary())
+        out.update(self._segments.summary())
+        return out

@@ -1,18 +1,19 @@
-"""分析阶段：只做计算，不画图、不写视频。
+"""采集阶段：只做逐帧计算与记录，不做段处理、不画图、不写视频。
 
-把原来"检测 → 关联 → 画图 → 写视频"交织的单遍循环拆成两遍扫描的第一步：
+三段式结构中的第一段：
 
-    analyze_video()  → AnalysisResult   （本文件）
-    render_video()   → 输出 mp4         （src/render.py）
+    采集    analyze_video()      本文件：检测 → 关联 → 门控 → 平滑，逐帧记录
+    段处理  process_segments()   src/segments.py：离线切段 + RANSAC 清洗 + 写 CSV
+    渲染    render_video()       src/render.py：读原视频重放视觉层并写 mp4
 
-为什么要拆：
-- "算"与"画"解耦后，渲染层可以自由改（按速度上色、慢动作、加批注）而不用重跑 YOLO；
-- 分析结果可落盘（JSON），支持"分析一次、渲染多次";
-- 为需要回看整段的算法（Kalman 平滑、Viterbi、批优化）预留两遍结构。
+采集阶段只输出两样东西：
+- FrameRecord 列表（每帧的渲染快照 + 决策结果），供渲染与段处理使用；
+- <stem>.traj.csv（逐帧事件表，流式写出）。
 
 一致性约束（重要）：
-FrameRecord 必须记录**复刻原单遍渲染所需的全部数据**，否则两阶段输出会与
-原版本不一致。回归验证方式：全片输出 mp4 与基线 MD5 逐字节比对。
+FrameRecord 必须记录**复刻原单遍渲染所需的全部数据**；分段所需的 (frame, event, smooth)
+也要完整，否则段处理无法离线重算出与旧版一致的段。回归验证方式：
+全片输出 mp4 与基线 MD5 逐字节比对、三个 CSV 与基线 SHA256 比对。
 """
 
 import json
@@ -25,10 +26,9 @@ import cv2
 import numpy as np
 
 from src.detector import extract_shuttlecock_candidates
-from src.export import TrajectoryRecorder
+from src.export import FrameRecorder
 from src.tracker import association
 from src.tracker.association import mark_static_candidates, select_best_candidate
-from src.tracker.cleaner import ransac_clean_parabola
 from src.tracker.predictor import dynamic_step_threshold, predict_linear
 from utils.common import distance
 
@@ -36,32 +36,9 @@ from utils.common import distance
 TRAIL_MAX_KEEP = 30
 
 
-def _clean_segment(points, frames, ransac_cfg):
-    """对一段轨迹做 RANSAC 清洗。
-
-    返回 (cleaned_points, cleaned_frames, mask)。mask 与输入等长且保序，
-    因此可以直接用布尔掩码把内点映射回原始帧号。
-
-    点数 <= min_samples 的短段**不做清洗**：RANSAC 至少需要 min_samples 个点，
-    对恰好等量的输入没有冗余度，可能把整段判成离群而清空（实测 5 点含 1 个离群 → 0 点）。
-    短段按原样返回，保证 segments.csv 的 n_cleaned == n_raw 契约成立。
-    """
-    if len(points) <= int(ransac_cfg["min_samples"]):
-        return list(points), list(frames), np.ones(len(points), dtype=bool)
-    cleaned, mask = ransac_clean_parabola(
-        points,
-        min_samples=ransac_cfg["min_samples"],
-        max_iter=ransac_cfg["max_iter"],
-        residual_thresh=ransac_cfg["residual_thresh"],
-        return_mask=True,
-    )
-    cleaned_frames = [frames[i] for i in range(min(len(mask), len(frames))) if mask[i]]
-    return cleaned, cleaned_frames, mask
-
-
 @dataclass
 class FrameRecord:
-    """一帧的渲染快照（分析阶段产出，渲染阶段消费）。"""
+    """一帧的采集结果（渲染快照 + 决策），是段处理与渲染的唯一输入。"""
 
     frame: int
     raw_boxes: list = field(default_factory=list)  # [[cx,cy,bw,bh,conf], ...]
@@ -103,7 +80,7 @@ class FrameRecord:
 
 @dataclass
 class AnalysisResult:
-    """整段视频的分析结果：逐帧快照 + 分段汇总 + 统计。"""
+    """采集结果：逐帧快照 + 统计。segments 由段处理阶段填充。"""
 
     video_path: str
     fps: float
@@ -195,17 +172,17 @@ def _collect_candidates(candidates):
 
 
 def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose=True):
-    """第一遍扫描：只计算，不写视频、不画图。
+    """第一遍扫描：逐帧采集，不写视频、不画图、不做段处理。
 
     参数
     ----
     video_path  输入视频
-    out_path    最终输出 mp4 的路径（本阶段只用它的目录/主干命名 CSV sidecar）
+    out_path    最终输出 mp4 的路径（本阶段只用它的目录/主干命名 traj.csv）
     limit       只处理前 N 帧（调试用）
-    save_traj   是否写轨迹 CSV（分析产物，与渲染无关）
-    verbose     是否打印逐帧日志（默认 True，保持与旧版一致的 CLI 输出）
+    save_traj   是否写逐帧事件 CSV（traj.csv）
+    verbose     是否打印逐帧日志与启动进度
 
-    返回 AnalysisResult。
+    返回 AnalysisResult（segments 为空，由 process_segments 填充）。
     """
     # 延迟导入 ultralytics：它会连锁加载 torch 及 CUDA 动态库（本机实测约 2.2s）。
     # 只有真正要跑检测时才需要这笔开销；--render-from 走渲染路径，不应为它付启动成本。
@@ -215,11 +192,11 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
     if verbose:
         # 进度提示走 stdout（数据输出本来就是逐帧日志；stderr 在 Windows PowerShell
         # 下会被渲染成红色错误块，容易误解为报错）
-        print(f"[分析] 加载 YOLO 权重: {cfg['model_path']}", flush=True)
+        print(f"[采集] 加载 YOLO 权重: {cfg['model_path']}", flush=True)
     model = YOLO(cfg["model_path"])
     if verbose:
         print(
-            f"[分析] 权重加载完成（{time.perf_counter() - t_start:.2f}s）；"
+            f"[采集] 权重加载完成（{time.perf_counter() - t_start:.2f}s）；"
             "正在初始化 CUDA 并执行首帧推理（首次约 3~5 秒）...",
             flush=True,
         )
@@ -237,18 +214,16 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
         cap.release()
         raise ValueError(f"无法读取视频尺寸: {video_path}")
 
-    # 模块级静态记忆是全局状态；每次分析都从空记忆开始，保证可复现
+    # 模块级静态记忆是全局状态；每次采集都从空记忆开始，保证可复现
     association.static_candidate_memory.clear()
 
     recorder = None
     try:
-        recorder = TrajectoryRecorder(out_path, enabled=save_traj)
+        recorder = FrameRecorder(out_path, enabled=save_traj)
 
         track_cfg = cfg["tracker"]
-        ransac_cfg = cfg["ransac"]
         smooth_win = deque(maxlen=track_cfg["smooth_window_len"])
         full_traj = []
-        full_traj_frames = []
         missing = 0
         MAX_MISS = track_cfg["max_miss"]
         roi = [(50, 50), (w - 50, h - 50)]
@@ -258,47 +233,9 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
         accepted = 0
         rejected = 0
         missed = 0
-        last_frame = 0
         segment_id = 0
         active_segment_id = None
-        segments = []
         frames = []
-
-        def finalize_segment(end_frame):
-            """结束当前轨迹段：取走缓冲、清洗、落盘（先清空再写，保证幂等）。"""
-            nonlocal segment_id, active_segment_id
-            raw = list(full_traj)
-            raw_frames = list(full_traj_frames)
-            full_traj.clear()
-            full_traj_frames.clear()
-            smooth_win.clear()
-            if not raw:
-                return
-            cleaned, cleaned_frames, _ = _clean_segment(raw, raw_frames, ransac_cfg)
-            if verbose and len(raw) > ransac_cfg["min_samples"]:
-                print(f"\n==== trajectory end, raw len: {len(raw)} ====")
-                print(f"==== cleaned len: {len(cleaned)} ====\n")
-            segment = {
-                "segment_id": segment_id,
-                "start_frame": raw_frames[0] if raw_frames else end_frame,
-                "end_frame": raw_frames[-1] if raw_frames else end_frame,
-                "n_raw": len(raw),
-                "n_cleaned": len(cleaned),
-                "first_x": raw[0][0],
-                "first_y": raw[0][1],
-                "last_x": raw[-1][0],
-                "last_y": raw[-1][1],
-            }
-            segments.append(segment)
-            recorder.add_segment(segment)
-            if cleaned_frames:
-                recorder.add_clean_points(
-                    segment_id, [(f, p[0], p[1]) for f, p in zip(cleaned_frames, cleaned)]
-                )
-            else:
-                recorder.add_clean_flat(segment_id, cleaned)
-            segment_id += 1
-            active_segment_id = None
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -308,11 +245,10 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
                 break
             processed += 1
             fid = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-            last_frame = fid
             results = model(frame, conf=cfg["detector"]["yolo_conf"], verbose=False)[0]
             if verbose and processed == 1:
                 print(
-                    f"[分析] 初始化完成（累计 {time.perf_counter() - t_start:.2f}s），开始逐帧处理",
+                    f"[采集] 初始化完成（累计 {time.perf_counter() - t_start:.2f}s），开始逐帧处理",
                     flush=True,
                 )
 
@@ -373,7 +309,6 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
                     arr = np.array(list(smooth_win))
                     smooth_pt = tuple(np.mean(arr, axis=0))
                     full_traj.append(smooth_pt)
-                    full_traj_frames.append(fid)
                     record.smooth = [float(smooth_pt[0]), float(smooth_pt[1])]
                     record.event = "obs"
                     if verbose:
@@ -403,11 +338,14 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
             frames.append(record)
 
             if missing > MAX_MISS:
-                finalize_segment(fid)
+                # 段结束：推进段号、清空平滑/轨迹缓冲（只影响后续帧的 segment_id 列；
+                # 真正的分段与清洗在 process_segments 里离线完成）
+                if full_traj:
+                    segment_id += 1
+                    active_segment_id = None
+                full_traj.clear()
+                smooth_win.clear()
                 missing = 0
-
-        if full_traj:
-            finalize_segment(last_frame)
 
         return AnalysisResult(
             video_path=video_path,
@@ -419,7 +357,7 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
             accepted=accepted,
             rejected=rejected,
             miss=missed,
-            segments=segments,
+            segments=[],
             frames=frames,
             csv=recorder.summary(),
             limit=limit,
