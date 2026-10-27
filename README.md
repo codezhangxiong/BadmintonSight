@@ -37,7 +37,24 @@ python scripts/run_track.py --video videos/badminton.mp4 --weights weights/yolo1
 
 # 只跑前 100 帧做调试
 python scripts/run_track.py --video videos/badminton.mp4 --weights weights/yolo11s-ball.pt --no-gui --limit 100
+
+# 两阶段用法（跟踪已拆成"先分析、再渲染"两遍扫描）
+# ① 只分析：产出 3 个 CSV + analysis.json，不生成视频（约 16s）
+python scripts/run_track.py --video videos/badminton.mp4 --weights weights/yolo11s-ball.pt \
+    --output outputs/run.mp4 --analyze-only --no-gui
+# ② 只渲染：复用上一步的 analysis.json，跳过 YOLO（约 24s，可反复重跑调试视觉）
+python scripts/run_track.py --video videos/badminton.mp4 \
+    --output outputs/run.mp4 --render-from outputs/run.analysis.json --no-gui
 ```
+
+**两阶段结构**（默认行为不变，一条命令仍是"分析 → 渲染"）：
+
+| 阶段 | 模块 | 做什么 | 产物 |
+|---|---|---|---|
+| 分析 | `src/analysis.py` `analyze_video()` | YOLO 检测、候选/静态标记、关联、门控、分段、RANSAC | CSV + `AnalysisResult`（可存 JSON） |
+| 渲染 | `src/render.py` `render_video()` | 只按分析快照重放视觉层并写 mp4 | 视频 |
+
+好处：改渲染（配色、标注、慢动作）不用重跑 YOLO；后续接入 Kalman/批优化时，分析阶段可以直接变成"两遍扫描"的第一遍。
 
 - 可从**任意工作目录**调用（脚本会自动定位项目根），不再需要设置 `PYTHONPATH`。
 - 相对路径一律以**项目根**为基准解析。
@@ -47,11 +64,14 @@ python scripts/run_track.py --video videos/badminton.mp4 --weights weights/yolo1
 |---|---|---|
 | `--config` | `configs/track_cfg.yaml` | 配置文件 |
 | `--video` | 必填 | 输入视频 |
-| `--weights` | 必填 | YOLO 权重 |
-| `--output` | `outputs/track_<时间戳>.mp4` | 输出视频 |
+| `--weights` | 必填 | YOLO 权重（`--render-from` 模式可省略） |
+| `--output` | `outputs/track_<时间戳>.mp4` | 输出视频（`--analyze-only` 时只用作 CSV/JSON 命名基准） |
 | `--no-gui` | 关 | 不弹 OpenCV 窗口 |
 | `--no-traj` | 关 | 不写轨迹 CSV |
 | `--limit` | 全部 | 只处理前 N 帧 |
+| `--analyze-only` | 关 | 只跑分析阶段，写 CSV + analysis.json |
+| `--render-from` | 空 | 从已有 analysis.json 渲染（跳过 YOLO） |
+| `--analysis-json` | 空 | 另存分析结果 JSON；`--analyze-only` 默认 `<输出主干>.analysis.json` |
 
 ## 输出
 

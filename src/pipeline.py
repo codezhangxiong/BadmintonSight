@@ -1,278 +1,82 @@
+"""pipeline 编排层：把跟踪拆成"先分析、再渲染"两遍扫描。
+
+历史：旧版是一个 while 循环里同时做"检测/关联/平滑/门控/画图/写视频"，
+无法二次渲染，也无法插入需要回看整段的算法。现在拆成：
+
+    src/analysis.py  analyze_video()   第一遍：只计算，产出 AnalysisResult（可落盘 JSON）
+    src/render.py    render_video()    第二遍：只画图，读原视频重放视觉层并写 mp4
+
+默认行为（run_pipeline）仍然是"一条命令得到视频 + CSV"，与旧版 CLI 兼容；
+额外支持"只分析"和"只渲染"，见 scripts/run_track.py 的 --analyze-only / --render-from。
+"""
+
+from src.analysis import (  # noqa: F401  (_clean_segment 对外保留，测试与旧调用方可能引用)
+    AnalysisResult,
+    FrameRecord,
+    _clean_segment,
+    analyze_video,
+    load_analysis,
+    save_analysis,
+)
+from src.render import draw_frame, render_video  # noqa: F401
+
 import os
-from collections import deque
-
-import cv2
-import numpy as np
-from ultralytics import YOLO
-
-from src.detector import extract_shuttlecock_candidates
-from src.export import TrajectoryRecorder
-from src.tracker.association import mark_static_candidates, select_best_candidate
-from src.tracker.cleaner import ransac_clean_parabola
-from src.tracker.predictor import dynamic_step_threshold, predict_linear
-from src.visualizer import draw_candidates, draw_fade_points
-from utils.common import distance
 
 
-def _clean_segment(points, frames, ransac_cfg):
-    """对一段轨迹做 RANSAC 清洗。
-
-    返回 (cleaned_points, cleaned_frames, mask)。mask 与输入等长且保序，
-    因此可以直接用布尔掩码把内点映射回原始帧号。
-
-    点数 <= min_samples 的短段**不做清洗**：RANSAC 至少需要 min_samples 个点，
-    对恰好等量的输入没有冗余度，可能把整段判成离群而清空（实测 5 点含 1 个离群 → 0 点）。
-    短段按原样返回，保证 segments.csv 的 n_cleaned == n_raw 契约成立。
-    """
-    if len(points) <= int(ransac_cfg["min_samples"]):
-        return list(points), list(frames), np.ones(len(points), dtype=bool)
-    cleaned, mask = ransac_clean_parabola(
-        points,
-        min_samples=ransac_cfg["min_samples"],
-        max_iter=ransac_cfg["max_iter"],
-        residual_thresh=ransac_cfg["residual_thresh"],
-        return_mask=True,
-    )
-    cleaned_frames = [frames[i] for i in range(min(len(mask), len(frames))) if mask[i]]
-    return cleaned, cleaned_frames, mask
+def _summary(out_path, analysis, rendered_frames, analysis_json=None):
+    summary = {
+        "out_path": out_path,
+        "frames": analysis.processed,
+        "expected_frames": analysis.total_frames,
+        "accepted": analysis.accepted,
+        "rejected": analysis.rejected,
+        "miss": analysis.miss,
+        "segments": analysis.segments,
+        "rendered_frames": rendered_frames,
+    }
+    summary.update(analysis.csv)
+    if analysis_json:
+        summary["analysis_json"] = analysis_json
+    return summary
 
 
-def run_pipeline(video_path, out_path, cfg, show_gui=True, limit=None, save_traj=True):
-    """跑完整条视频。
+def run_pipeline(video_path, out_path, cfg, show_gui=True, limit=None, save_traj=True, analysis_json=None):
+    """两阶段跑完整视频：分析 → 渲染。
 
     参数
     ----
-    video_path  输入视频
-    out_path    输出 mp4（父目录会自动创建）
-    cfg         configs/track_cfg.yaml 加载后的 dict，需含 tracker/ransac/detector 段，
-                并由调用方注入 model_path
-    show_gui    是否弹 OpenCV 调试窗口（服务器/CI 传 False）
-    limit       只处理前 N 帧（调试用），None 表示整片
-    save_traj   是否写出轨迹 CSV sidecar
+    video_path      输入视频
+    out_path        输出 mp4（父目录自动创建；CSV sidecar 与它同名同目录）
+    cfg             configs/track_cfg.yaml 加载后的 dict（需含 tracker/ransac/detector，并注入 model_path）
+    show_gui        渲染时是否弹 OpenCV 窗口
+    limit           只处理前 N 帧（调试用），None 表示整片
+    save_traj       是否写轨迹 CSV
+    analysis_json   若给出路径，则把分析结果落盘为 JSON（便于之后 --render-from 复用）
 
-    返回
-    ----
-    dict：输出路径、CSV 路径、帧数统计与分段列表
+    返回 summary dict（字段与旧版兼容，另加 rendered_frames / analysis_json）。
     """
-    model = YOLO(cfg["model_path"])
+    analysis = analyze_video(
+        video_path, cfg, out_path=out_path, limit=limit, save_traj=save_traj, verbose=True
+    )
+    if analysis_json:
+        save_analysis(analysis, analysis_json)
+    rendered = render_video(video_path, out_path, analysis, show_gui=show_gui)
+    return _summary(out_path, analysis, rendered["frames"], analysis_json=analysis_json)
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise FileNotFoundError(f"无法打开视频: {video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if not fps or fps <= 0:
-        fps = 30.0
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    if w <= 0 or h <= 0:
-        cap.release()
-        raise ValueError(f"无法读取视频尺寸: {video_path}")
+def run_analysis_only(video_path, cfg, out_path, limit=None, save_traj=True, analysis_json=None):
+    """只做第一遍扫描：写 CSV（可选）与分析 JSON，不生成视频。"""
+    analysis = analyze_video(
+        video_path, cfg, out_path=out_path, limit=limit, save_traj=save_traj, verbose=True
+    )
+    if not analysis_json:
+        analysis_json = os.path.splitext(out_path)[0] + ".analysis.json"
+    save_analysis(analysis, analysis_json)
+    return _summary(out_path, analysis, 0, analysis_json=analysis_json)
 
-    out_dir = os.path.dirname(os.path.abspath(out_path))
-    os.makedirs(out_dir, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
-    if not out.isOpened():
-        cap.release()
-        raise RuntimeError(
-            f"无法创建输出视频（检查编码器 mp4v 是否可用、路径是否有写权限）: {out_path}"
-        )
 
-    recorder = None
-
-    track_cfg = cfg["tracker"]
-    ransac_cfg = cfg["ransac"]
-    smooth_win = deque(maxlen=track_cfg["smooth_window_len"])
-    full_traj = []
-    full_traj_frames = []
-    missing = 0
-    MAX_MISS = track_cfg["max_miss"]
-    roi = [(50, 50), (w - 50, h - 50)]
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    processed = 0
-    accepted = 0
-    rejected = 0
-    missed = 0
-    last_frame = 0
-    segment_id = 0
-    active_segment_id = None  # None 表示当前帧不属于任何活跃轨迹段（段外丢帧）
-    segments = []
-
-    def finalize_segment(end_frame):
-        """结束当前轨迹段：取走缓冲、清洗、落盘。
-
-        先把缓冲搬空再清洗/写盘：即使清洗或写盘抛异常，finally 里也不会把同一段
-        重复记录一次（幂等）。
-        """
-        nonlocal segment_id, active_segment_id
-        raw = list(full_traj)
-        raw_frames = list(full_traj_frames)
-        full_traj.clear()
-        full_traj_frames.clear()
-        smooth_win.clear()
-        if not raw:
-            return
-        cleaned, cleaned_frames, _ = _clean_segment(raw, raw_frames, ransac_cfg)
-        if len(raw) > ransac_cfg["min_samples"]:
-            print(f"\n==== trajectory end, raw len: {len(raw)} ====")
-            print(f"==== cleaned len: {len(cleaned)} ====\n")
-        segment = {
-            "segment_id": segment_id,
-            # 起止帧取"实际有观测的帧"，与轨迹点范围一致，便于和视频帧对齐
-            "start_frame": raw_frames[0] if raw_frames else end_frame,
-            "end_frame": raw_frames[-1] if raw_frames else end_frame,
-            "n_raw": len(raw),
-            "n_cleaned": len(cleaned),
-            "first_x": raw[0][0],
-            "first_y": raw[0][1],
-            "last_x": raw[-1][0],
-            "last_y": raw[-1][1],
-        }
-        segments.append(segment)
-        recorder.add_segment(segment)
-        if cleaned_frames:
-            recorder.add_clean_points(
-                segment_id, [(f, p[0], p[1]) for f, p in zip(cleaned_frames, cleaned)]
-            )
-        else:
-            recorder.add_clean_flat(segment_id, cleaned)
-        segment_id += 1
-        active_segment_id = None
-
-    try:
-        recorder = TrajectoryRecorder(out_path, enabled=save_traj)
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if limit is not None and processed >= limit:
-                break
-            processed += 1
-            fid = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-            last_frame = fid
-            results = model(frame, conf=cfg["detector"]["yolo_conf"], verbose=False)[0]
-
-            # draw raw boxes for debug
-            raw = results.boxes
-            if raw is not None:
-                xywh = raw.xywh.detach().cpu().numpy()
-                confs = raw.conf.detach().cpu().numpy()
-                for cx, cy, bw, bh, conf in zip(xywh[:, 0], xywh[:, 1], xywh[:, 2], xywh[:, 3], confs):
-                    x1 = int(cx - bw / 2)
-                    y1 = int(cy - bh / 2)
-                    x2 = int(cx + bw / 2)
-                    y2 = int(cy + bh / 2)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
-                    cv2.putText(frame, f"{conf:.2f}", (x1, y1 - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
-
-            candidates = extract_shuttlecock_candidates(results.boxes, frame.shape, cfg, roi)
-            candidates = mark_static_candidates(
-                candidates,
-                fid,
-                grid_size=track_cfg["grid_size"],
-                static_frame_count=track_cfg["static_frame_count"],
-            )
-            draw_candidates(frame, candidates)
-
-            ref_pt = predict_linear(full_traj, n_lookback=4)
-            best = select_best_candidate(candidates, ref_pt, full_traj, cfg)
-
-            smooth_pt = None
-            d = None
-            th = None
-            if best is not None:
-                obs_pt = best["point"]
-                cv2.circle(frame, obs_pt, 7, (0, 255, 255), -1)
-                outlier = False
-                if len(smooth_win) > 0:
-                    last_p = smooth_win[-1]
-                    d = distance(obs_pt, last_p)
-                    th = dynamic_step_threshold(
-                        full_traj,
-                        base_gain=track_cfg["dynamic_gain"],
-                        min_thresh=track_cfg["dynamic_min_thresh"],
-                        max_thresh=track_cfg["dynamic_max_thresh"],
-                    )
-                    if d > th:
-                        outlier = True
-                if outlier:
-                    missing += 1
-                    rejected += 1
-                    print(f"[Frame {fid}] OBS {obs_pt} outlier drop")
-                    recorder.add_frame(
-                        fid,
-                        active_segment_id,
-                        "rejected",
-                        obs=obs_pt,
-                        candidate=best,
-                        dist_to_prev=d,
-                        threshold=th,
-                    )
-                else:
-                    missing = 0
-                    accepted += 1
-                    if active_segment_id is None:
-                        active_segment_id = segment_id
-                    smooth_win.append(np.array(obs_pt))
-                    arr = np.array(list(smooth_win))
-                    smooth_pt = tuple(np.mean(arr, axis=0))
-                    full_traj.append(smooth_pt)
-                    full_traj_frames.append(fid)
-                    print(f"[Frame {fid}] obs {obs_pt}, smooth {np.round(smooth_pt, 1)}")
-                    recorder.add_frame(
-                        fid,
-                        active_segment_id,
-                        "obs",
-                        obs=obs_pt,
-                        smooth=smooth_pt,
-                        candidate=best,
-                        dist_to_prev=d,
-                        threshold=th,
-                    )
-            else:
-                missing += 1
-                missed += 1
-                print(f"[Frame {fid}] no obs, missing={missing}")
-                recorder.add_frame(fid, active_segment_id, "miss")
-
-            if smooth_pt is not None:
-                cv2.circle(frame, (int(smooth_pt[0]), int(smooth_pt[1])), 6, (0, 0, 255), -1)
-            draw_fade_points(frame, full_traj, max_keep=30)
-
-            out.write(frame)
-            if show_gui:
-                cv2.imshow("debug", frame)
-                if cv2.waitKey(20) & 0xFF == ord("q"):
-                    break
-
-            if missing > MAX_MISS:
-                finalize_segment(fid)
-                missing = 0
-    finally:
-        # 视频结束 / 按 q 退出时，最后一段此前不会触发清洗，这里补上，避免轨迹丢失。
-        # 嵌套 try/finally：即使收尾清洗抛异常，也必须释放 recorder / cap / out / 窗口。
-        try:
-            if full_traj:
-                finalize_segment(last_frame)
-        finally:
-            if recorder is not None:
-                recorder.close()
-            cap.release()
-            out.release()
-            if show_gui:
-                cv2.destroyAllWindows()
-
-    summary = {
-        "out_path": out_path,
-        "frames": processed,
-        "expected_frames": total_frames,
-        "accepted": accepted,
-        "rejected": rejected,
-        "miss": missed,
-        "segments": segments,
-    }
-    if recorder is not None:
-        summary.update(recorder.summary())
-    return summary
+def run_render_only(video_path, out_path, analysis_json, show_gui=False):
+    """只做第二遍渲染：从已有分析 JSON 生成视频（不加载 YOLO）。"""
+    analysis = load_analysis(analysis_json)
+    rendered = render_video(video_path, out_path, analysis, show_gui=show_gui)
+    return _summary(out_path, analysis, rendered["frames"], analysis_json=analysis_json)
