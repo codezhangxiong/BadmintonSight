@@ -39,22 +39,22 @@ python scripts/run_track.py --video videos/badminton.mp4 --weights weights/yolo1
 python scripts/run_track.py --video videos/badminton.mp4 --weights weights/yolo11s-ball.pt --no-gui --limit 100
 
 # 三段式局部运行（采集 → 段处理 → 渲染）
-# ① 只采集 + 段处理：产出 3 个 CSV + analysis.json，不生成视频（约 18s）
+# ① 只采集 + 段处理：产出 3 个 CSV + capture.json，不生成视频（约 18s）
 python scripts/run_track.py --video videos/badminton.mp4 --weights weights/yolo11s-ball.pt \
-    --output outputs/run.mp4 --analyze-only --no-gui
+    --output outputs/run.mp4 --capture-only --no-gui
 # ② 只重做段处理：调门控阈值 / max_miss / ransac 参数后重算决策与分段（约 0.6s，不加载 YOLO）
-python scripts/run_track.py --segments-from outputs/run.analysis.json \
+python scripts/run_track.py --segments-from outputs/run.capture.json \
     --output outputs/run.mp4 --config configs/track_cfg.yaml
-# ③ 只渲染：复用 analysis.json 重放视觉层（约 24s，不加载 YOLO）
+# ③ 只渲染：复用 capture.json 重放视觉层（约 24s，不加载 YOLO）
 python scripts/run_track.py --video videos/badminton.mp4 \
-    --output outputs/run.mp4 --render-from outputs/run.analysis.json --no-gui
+    --output outputs/run.mp4 --render-from outputs/run.capture.json --no-gui
 ```
 
 **三段式结构**（默认行为不变，一条命令仍是"采集 → 段处理 → 渲染"）：
 
 | 阶段 | 模块 | 做什么 | 产物 |
 |---|---|---|---|
-| 采集 | `src/analysis.py` `analyze_video()` | 逐帧 YOLO 检测、候选过滤、静态标记；**只记录每帧全部候选，不做跟踪决策** | `AnalysisResult`（可存 JSON） |
+| 采集 | `src/capture.py` `capture_video()` | 逐帧 YOLO 检测、候选过滤、静态标记；**只记录每帧全部候选，不做跟踪决策** | `CaptureResult`（可存 JSON） |
 | 段处理 | `src/segments.py` `resolve_tracks()` | 重放**关联 → 预测 → 门控 → 平滑**，再切段（连续丢帧规则）、RANSAC 清洗 | `traj.csv` + `segments.csv` + `clean.csv` |
 | 渲染 | `src/render.py` `render_video()` | 只按帧快照重放视觉层并写 mp4 | 视频 |
 
@@ -71,14 +71,14 @@ python scripts/run_track.py --video videos/badminton.mp4 \
 | `--config` | `configs/track_cfg.yaml` | 配置文件 |
 | `--video` | 必填 | 输入视频（`--segments-from` 模式可省略） |
 | `--weights` | 必填 | YOLO 权重（`--render-from` / `--segments-from` 模式可省略） |
-| `--output` | `outputs/track_<时间戳>.mp4` | 输出视频（`--analyze-only` 时只用作 CSV/JSON 命名基准） |
+| `--output` | `outputs/track_<时间戳>.mp4` | 输出视频（`--capture-only` 时只用作 CSV/JSON 命名基准） |
 | `--no-gui` | 关 | 不弹 OpenCV 窗口 |
 | `--no-traj` | 关 | 不写轨迹 CSV |
 | `--limit` | 全部 | 只处理前 N 帧 |
-| `--analyze-only` | 关 | 只跑采集 + 段处理，写 CSV + analysis.json |
-| `--segments-from` | 空 | 从 analysis.json 重做跟踪决策 + 分段（只写 CSV，跳过 YOLO） |
-| `--render-from` | 空 | 从已有 analysis.json 渲染（跳过 YOLO） |
-| `--analysis-json` | 空 | 另存分析结果 JSON；`--analyze-only` 默认 `<输出主干>.analysis.json` |
+| `--capture-only` | 关 | 只跑采集 + 段处理，写 CSV + capture.json |
+| `--segments-from` | 空 | 从 capture.json 重做跟踪决策 + 分段（只写 CSV，跳过 YOLO） |
+| `--render-from` | 空 | 从已有 capture.json 渲染（跳过 YOLO） |
+| `--capture-json` | 空 | 另存采集+段处理结果 JSON；`--capture-only` 默认 `<输出主干>.capture.json` |
 
 ## 输出
 

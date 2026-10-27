@@ -12,7 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import yaml  # noqa: E402
 
 from src.pipeline import (  # noqa: E402
-    run_analysis_only,
+    run_capture_only,
     run_pipeline,
     run_render_only,
     run_segments_only,
@@ -46,14 +46,14 @@ def parse_args():
                    help="不弹 OpenCV 窗口（服务器/CI/批处理用）")
     p.add_argument("--no-traj", action="store_true", help="不写三份 CSV")
     p.add_argument("--limit", type=int, default=None, help="只处理前 N 帧（调试用）")
-    p.add_argument("--analyze-only", action="store_true",
-                   help="只跑采集 + 段处理（写 CSV + analysis.json），不渲染视频")
+    p.add_argument("--capture-only", action="store_true",
+                   help="只跑采集 + 段处理（写 CSV + capture.json），不渲染视频")
     p.add_argument("--segments-from", type=str, default="",
-                   help="从 analysis.json 重做段处理（写 CSV，不重跑 YOLO、不渲染）")
+                   help="从 capture.json 重做段处理（写 CSV，不重跑 YOLO、不渲染）")
     p.add_argument("--render-from", type=str, default="",
-                   help="从 analysis.json 渲染视频（跳过 YOLO，仍需 --video）")
-    p.add_argument("--analysis-json", type=str, default="",
-                   help="另存采集+段处理结果 JSON；--analyze-only 默认 <输出主干>.analysis.json")
+                   help="从 capture.json 渲染视频（跳过 YOLO，仍需 --video）")
+    p.add_argument("--capture-json", type=str, default="",
+                   help="另存采集+段处理结果 JSON；--capture-only 默认 <输出主干>.capture.json")
     return p.parse_args()
 
 
@@ -83,7 +83,7 @@ def main():
         raise ValueError("缺少 --video")
 
     out_path = str(_resolve(args.output)) if args.output else _default_out_path()
-    analysis_json = str(_resolve(args.analysis_json)) if args.analysis_json else ""
+    capture_json = str(_resolve(args.capture_json)) if args.capture_json else ""
     shown_video = "(未使用)"
     shown_config = "(未使用)"
     shown_weights = "(未使用)"
@@ -94,8 +94,6 @@ def main():
         shown_config = _resolve(args.config, must_exist=True)
         cfg = load_config(shown_config)
         summary = run_segments_only(str(seg_json), cfg, out_path, save_traj=not args.no_traj)
-        shown_video = "(未使用)"
-        shown_weights = "(未使用)"
     elif args.render_from:
         if not args.video:
             raise ValueError("--render-from 需要 --video（用于读取原始帧）")
@@ -115,14 +113,14 @@ def main():
         cfg = load_config(shown_config)
         cfg["model_path"] = str(shown_weights)
 
-        if args.analyze_only:
-            summary = run_analysis_only(
+        if args.capture_only:
+            summary = run_capture_only(
                 str(video_path),
                 cfg,
                 out_path,
                 limit=args.limit,
                 save_traj=not args.no_traj,
-                analysis_json=analysis_json or None,
+                capture_json=capture_json or None,
             )
         else:
             summary = run_pipeline(
@@ -132,7 +130,7 @@ def main():
                 show_gui=not args.no_gui,
                 limit=args.limit,
                 save_traj=not args.no_traj,
-                analysis_json=analysis_json or None,
+                capture_json=capture_json or None,
             )
 
     print("=" * 60)
@@ -147,8 +145,8 @@ def main():
         print(f"逐帧轨迹  : {summary['traj_csv']}")
         print(f"分段汇总  : {summary['segments_csv']}")
         print(f"清洗轨迹  : {summary['clean_csv']}")
-    if summary.get("analysis_json"):
-        print(f"分析结果  : {summary['analysis_json']}")
+    if summary.get("capture_json"):
+        print(f"采集结果  : {summary['capture_json']}")
     print(
         f"处理帧数  : {summary['frames']} / {summary['expected_frames']}"
         f"  （接受 {summary['accepted']}，离群丢弃 {summary['rejected']}，无观测 {summary['miss']}）"

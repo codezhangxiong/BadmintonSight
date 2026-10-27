@@ -2,17 +2,17 @@
 
 三段式结构中的第一段：
 
-    采集    analyze_video()      本文件：检测 → 候选过滤 → 静态标记，逐帧记录候选
+    采集    capture_video()      本文件：检测 → 候选过滤 → 静态标记，逐帧记录候选
     段处理  resolve_tracks()     src/segments.py：关联 + 预测 + 门控 + 平滑 + 切段 + 清洗
     渲染    render_video()       src/render.py：读原视频重放视觉层并写 mp4
 
 职责边界（重要）：
 - 采集阶段**不判断哪个候选是球、不做门控、不丢弃观测**，只把每帧的候选完整记录下来
-  （point / is_static / conf / area_ratio / aspect_ratio）。因此更换关联策略、门控阈值、
-  平滑方式、分段规则都不需要重跑 YOLO。
+  （point / is_static / conf / area_ratio / aspect_ratio / bbox）。因此更换关联策略、
+  门控阈值、平滑方式、分段规则都不需要重跑 YOLO。
 - 决策链（关联→预测→门控→平滑→分段）全部在段处理阶段重放，见 src/segments.py。
 
-为什么门控必须和关联/平滑一起移走：
+为什么门控必须和关联/平滑一起放在段处理：
 关联需要"历史轨迹"做预测（predict_linear），而历史轨迹只由"通过门控的观测"构成。
 如果把门控单独留在采集端，它就得依赖平滑状态、而平滑又依赖门控结果，形成环。
 所以正确的切分是：采集=感知（无状态），段处理=决策（有状态）。
@@ -29,9 +29,6 @@ from src.detector import extract_shuttlecock_candidates
 from src.tracker import association
 from src.tracker.association import mark_static_candidates
 
-# 渲染阶段的历史点上限，必须与画图端 draw_fade_points(max_keep=30) 一致
-TRAIL_MAX_KEEP = 30
-
 
 @dataclass
 class FrameRecord:
@@ -42,8 +39,8 @@ class FrameRecord:
 
     frame: int
     raw_boxes: list = field(default_factory=list)  # [[cx,cy,bw,bh,conf], ...]
-    # 候选：[x, y, is_static, confidence, area_ratio, aspect_ratio]
-    # 前 3 项供渲染使用，后 3 项供段处理重放关联代价计算（保持原始数值）
+    # 候选：[x, y, is_static, confidence, area_ratio, aspect_ratio, x1, y1, x2, y2]
+    # 前 3 项供渲染使用，中间 3 项供段处理重放关联代价计算，后 4 项供 traj.csv 导出
     candidates: list = field(default_factory=list)
     chosen: list = None  # [x,y] 门控前选中的候选（被拒也会画黄点）
     rejected: bool = False
@@ -88,7 +85,7 @@ class FrameRecord:
 
 
 @dataclass
-class AnalysisResult:
+class CaptureResult:
     """采集结果：逐帧候选 + 决策字段（段处理阶段填充）。"""
 
     video_path: str
@@ -145,8 +142,8 @@ class AnalysisResult:
         return len(self.frames)
 
 
-def save_analysis(result, path):
-    """把分析结果写成 JSON（紧凑格式，避免体积膨胀）。"""
+def save_capture(result, path):
+    """把采集结果写成 JSON（紧凑格式，避免体积膨胀）。"""
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -155,9 +152,9 @@ def save_analysis(result, path):
     return path
 
 
-def load_analysis(path):
+def load_capture(path):
     with open(path, "r", encoding="utf-8") as fh:
-        return AnalysisResult.from_dict(json.load(fh))
+        return CaptureResult.from_dict(json.load(fh))
 
 
 def _collect_raw_boxes(boxes):
@@ -201,7 +198,7 @@ def _collect_candidates(candidates):
     return rows
 
 
-def analyze_video(video_path, cfg, limit=None, verbose=True):
+def capture_video(video_path, cfg, limit=None, verbose=True):
     """第一遍扫描：只做检测与候选记录（无状态），不判断、不丢弃、不写 CSV。
 
     参数
@@ -210,7 +207,7 @@ def analyze_video(video_path, cfg, limit=None, verbose=True):
     limit       只处理前 N 帧（调试用）
     verbose     是否打印逐帧日志与启动进度
 
-    返回 AnalysisResult（决策字段为空，由 resolve_tracks 填充）。
+    返回 CaptureResult（决策字段为空，由 resolve_tracks 填充）。
     """
     # 延迟导入 ultralytics：它会连锁加载 torch 及 CUDA 动态库（本机实测约 2.2s）。
     # 只有真正要跑检测时才需要这笔开销；只渲染/只重做段处理时不应付这笔启动成本。
@@ -285,7 +282,7 @@ def analyze_video(video_path, cfg, limit=None, verbose=True):
             if verbose:
                 print(f"[采集] Frame {fid}: 候选 {len(candidates)} 个")
 
-        return AnalysisResult(
+        return CaptureResult(
             video_path=video_path,
             fps=fps,
             width=w,

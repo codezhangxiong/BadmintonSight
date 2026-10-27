@@ -1,6 +1,6 @@
 """渲染阶段：只画图、不决策。
 
-输入是 analysis.AnalysisResult（第一遍扫描的帧快照），输出是可视化 mp4。
+输入是 capture.CaptureResult（第一遍扫描的帧快照），输出是可视化 mp4。
 本模块不加载 YOLO、不做关联/门控，因此渲染逻辑可以独立修改
 （换配色、按速度上色、加标注、慢动作）而不影响跟踪结果。
 
@@ -68,7 +68,7 @@ def draw_frame(frame, record):
     return frame
 
 
-def render_video(video_path, out_path, analysis, show_gui=False):
+def render_video(video_path, out_path, capture, show_gui=False):
     """第二遍扫描：读原视频，按分析快照逐帧重放视觉层并写 mp4。
 
     返回 {"out_path", "frames"}。
@@ -80,7 +80,7 @@ def render_video(video_path, out_path, analysis, show_gui=False):
     out_dir = os.path.dirname(os.path.abspath(out_path))
     os.makedirs(out_dir, exist_ok=True)
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(out_path, fourcc, analysis.fps, (analysis.width, analysis.height))
+    out = cv2.VideoWriter(out_path, fourcc, capture.fps, (capture.width, capture.height))
     if not out.isOpened():
         cap.release()
         raise RuntimeError(
@@ -89,7 +89,7 @@ def render_video(video_path, out_path, analysis, show_gui=False):
 
     rendered = 0
     try:
-        for record in analysis.frames:
+        for record in capture.frames:
             ret, frame = cap.read()
             if not ret:
                 break

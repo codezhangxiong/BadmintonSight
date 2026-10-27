@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.analysis import AnalysisResult, FrameRecord  # noqa: E402
+from src.capture import CaptureResult, FrameRecord  # noqa: E402
 from src.pipeline import _clean_segment  # noqa: E402,F401  (确认向后兼容的 re-export)
 from src.render import draw_frame  # noqa: E402
 
@@ -35,8 +35,8 @@ def _make_record(**kwargs):
     return FrameRecord(**defaults)
 
 
-def _make_analysis():
-    return AnalysisResult(
+def _make_capture():
+    return CaptureResult(
         video_path="videos/x.mp4",
         fps=50.0,
         width=1280,
@@ -76,20 +76,20 @@ class FrameRecordTest(unittest.TestCase):
         self.assertEqual(restored.event, "miss")
 
 
-class AnalysisResultTest(unittest.TestCase):
+class CaptureResultTest(unittest.TestCase):
     def test_round_trip(self):
-        analysis = _make_analysis()
-        restored = AnalysisResult.from_dict(json.loads(json.dumps(analysis.to_dict())))
-        self.assertEqual(restored.video_path, analysis.video_path)
-        self.assertEqual(restored.fps, analysis.fps)
-        self.assertEqual(restored.width, analysis.width)
-        self.assertEqual(restored.height, analysis.height)
-        self.assertEqual(restored.processed, analysis.processed)
-        self.assertEqual(restored.accepted, analysis.accepted)
+        capture = _make_capture()
+        restored = CaptureResult.from_dict(json.loads(json.dumps(capture.to_dict())))
+        self.assertEqual(restored.video_path, capture.video_path)
+        self.assertEqual(restored.fps, capture.fps)
+        self.assertEqual(restored.width, capture.width)
+        self.assertEqual(restored.height, capture.height)
+        self.assertEqual(restored.processed, capture.processed)
+        self.assertEqual(restored.accepted, capture.accepted)
         self.assertEqual(len(restored.frames), 2)
         self.assertEqual(restored.frames[1].event, "miss")
-        self.assertEqual(restored.segments, analysis.segments)
-        self.assertEqual(restored.csv, analysis.csv)
+        self.assertEqual(restored.segments, capture.segments)
+        self.assertEqual(restored.csv, capture.csv)
         self.assertEqual(restored.rendered_frames, 2)
 
 
@@ -103,21 +103,21 @@ class SaveLoadTest(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_save_and_load(self):
-        from src.analysis import load_analysis, save_analysis
+        from src.capture import load_capture, save_capture
 
-        path = os.path.join(self.tmp_dir, "a.analysis.json")
-        save_analysis(_make_analysis(), path)
+        path = os.path.join(self.tmp_dir, "a.capture.json")
+        save_capture(_make_capture(), path)
         self.assertTrue(os.path.isfile(path))
         self.assertFalse(os.path.exists(path + ".tmp"))
-        loaded = load_analysis(path)
+        loaded = load_capture(path)
         self.assertEqual(loaded.processed, 2)
         self.assertEqual(len(loaded.frames), 2)
 
     def test_save_creates_parent_dir(self):
-        from src.analysis import save_analysis
+        from src.capture import save_capture
 
         path = os.path.join(self.tmp_dir, "nested", "deep", "a.json")
-        save_analysis(_make_analysis(), path)
+        save_capture(_make_capture(), path)
         self.assertTrue(os.path.isfile(path))
 
 

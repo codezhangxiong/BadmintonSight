@@ -2,7 +2,7 @@
 
 三段式结构中的第二段：
 
-    采集    analyze_video()      逐帧检测 + 候选记录（无状态、不判断）
+    采集    capture_video()      逐帧检测 + 候选记录（无状态、不判断）
     段处理  resolve_tracks()     本文件：关联 → 预测 → 门控 → 平滑 → 切段 → RANSAC 清洗
     渲染    render_video()       读原视频重放视觉层并写 mp4
 
@@ -189,7 +189,7 @@ def collect_segments(frames, cfg):
     连续丢帧（rejected 或 miss）计数超过 max_miss 时结束当前段；视频结束时收尾最后一段。
 
     返回 (segments, clean_map)：
-    segments   —— 每段汇总（写入 segments.csv，也会存进 AnalysisResult）
+    segments   —— 每段汇总（写入 segments.csv，也会存进 CaptureResult）
     clean_map  —— {segment_id: (cleaned_points, cleaned_frames)}，用于写 clean.csv
     """
     max_miss = int(cfg["tracker"]["max_miss"])
@@ -236,21 +236,21 @@ def collect_segments(frames, cfg):
 
 
 # --------------------------------------------------------------------------- 编排
-def resolve_tracks(analysis, cfg, out_path=None, save_traj=True, verbose=True):
+def resolve_tracks(capture, cfg, out_path=None, save_traj=True, verbose=True):
     """段处理阶段总入口：决策重放 → 切段清洗 → 写三份 CSV。
 
     参数
     ----
-    analysis  采集结果（frames 里已记录候选；本函数填充决策字段）
+    capture   采集结果（frames 里已记录候选；本函数填充决策字段）
     cfg       配置 dict（tracker / ransac / detector）
     out_path  输出视频路径；CSV sidecar 按它的目录/主干命名
     save_traj 是否写 CSV
     verbose   是否打印逐帧决策与段结束日志
 
-    返回 analysis（原地更新并返回，便于链式调用）。
+    返回 capture（原地更新并返回，便于链式调用）。
     """
-    stats = replay_decisions(analysis.frames, cfg, verbose=verbose)
-    segments, clean_map = collect_segments(analysis.frames, cfg)
+    stats = replay_decisions(capture.frames, cfg, verbose=verbose)
+    segments, clean_map = collect_segments(capture.frames, cfg)
 
     if verbose:
         for segment in segments:
@@ -262,7 +262,7 @@ def resolve_tracks(analysis, cfg, out_path=None, save_traj=True, verbose=True):
     if save_traj and out_path:
         recorder = TrajectoryRecorder(out_path, enabled=True)
         try:
-            for record in analysis.frames:
+            for record in capture.frames:
                 recorder.add_frame(
                     record.frame,
                     record.segment_id,
@@ -287,9 +287,9 @@ def resolve_tracks(analysis, cfg, out_path=None, save_traj=True, verbose=True):
             recorder.close()
         csv_paths = recorder.summary()
 
-    analysis.accepted = stats["accepted"]
-    analysis.rejected = stats["rejected"]
-    analysis.miss = stats["miss"]
-    analysis.segments = segments
-    analysis.csv = csv_paths
-    return analysis
+    capture.accepted = stats["accepted"]
+    capture.rejected = stats["rejected"]
+    capture.miss = stats["miss"]
+    capture.segments = segments
+    capture.csv = csv_paths
+    return capture

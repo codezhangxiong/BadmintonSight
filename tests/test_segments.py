@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.analysis import AnalysisResult, FrameRecord  # noqa: E402
+from src.capture import CaptureResult, FrameRecord  # noqa: E402
 from src.segments import collect_segments, replay_decisions, resolve_tracks  # noqa: E402
 
 CFG = {
@@ -190,8 +190,8 @@ class ResolveTracksCsvTest(unittest.TestCase):
         with open(path, newline="", encoding="utf-8") as fh:
             return list(csv.DictReader(fh))
 
-    def _analysis(self, frames):
-        return AnalysisResult(
+    def _capture(self, frames):
+        return CaptureResult(
             video_path="videos/x.mp4",
             fps=50.0,
             width=1280,
@@ -213,37 +213,37 @@ class ResolveTracksCsvTest(unittest.TestCase):
         frames += [rec(f, "miss", candidates=[cand(500 + 2 * f, 300)]) for f in range(19, 25)]
         return frames
 
-    def test_resolve_writes_three_csv_and_updates_analysis(self):
-        analysis = self._analysis(self._track())
-        resolve_tracks(analysis, CFG, out_path=self.out_path, verbose=False)
+    def test_resolve_writes_three_csv_and_updates_capture(self):
+        capture = self._capture(self._track())
+        resolve_tracks(capture, CFG, out_path=self.out_path, verbose=False)
 
         for key in ("traj_csv", "segments_csv", "clean_csv"):
-            self.assertTrue(os.path.isfile(analysis.csv[key]), key)
-        self.assertGreaterEqual(len(analysis.segments), 1)
+            self.assertTrue(os.path.isfile(capture.csv[key]), key)
+        self.assertGreaterEqual(len(capture.segments), 1)
         self.assertEqual(
-            analysis.accepted + analysis.rejected + analysis.miss, len(analysis.frames)
+            capture.accepted + capture.rejected + capture.miss, len(capture.frames)
         )
 
-        traj_rows = self._read(analysis.csv["traj_csv"])
-        seg_rows = self._read(analysis.csv["segments_csv"])
-        clean_rows = self._read(analysis.csv["clean_csv"])
-        self.assertEqual(len(traj_rows), len(analysis.frames))
-        self.assertEqual(len(seg_rows), len(analysis.segments))
+        traj_rows = self._read(capture.csv["traj_csv"])
+        seg_rows = self._read(capture.csv["segments_csv"])
+        clean_rows = self._read(capture.csv["clean_csv"])
+        self.assertEqual(len(traj_rows), len(capture.frames))
+        self.assertEqual(len(seg_rows), len(capture.segments))
         self.assertEqual(
             len(clean_rows), sum(int(s["n_cleaned"]) for s in seg_rows)
         )
 
     def test_save_traj_false_writes_no_csv(self):
-        analysis = self._analysis(self._track())
-        resolve_tracks(analysis, CFG, out_path=self.out_path, save_traj=False, verbose=False)
-        self.assertEqual(analysis.csv, {})
+        capture = self._capture(self._track())
+        resolve_tracks(capture, CFG, out_path=self.out_path, save_traj=False, verbose=False)
+        self.assertEqual(capture.csv, {})
         self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "clip.traj.csv")))
-        self.assertGreaterEqual(len(analysis.segments), 1)
+        self.assertGreaterEqual(len(capture.segments), 1)
 
     def test_no_out_path_computes_without_writing(self):
-        analysis = self._analysis(self._track())
-        resolve_tracks(analysis, CFG, out_path=None, verbose=False)
-        self.assertEqual(analysis.csv, {})
+        capture = self._capture(self._track())
+        resolve_tracks(capture, CFG, out_path=None, verbose=False)
+        self.assertEqual(capture.csv, {})
         self.assertEqual(os.listdir(self.tmp_dir), [])
 
 
