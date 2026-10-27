@@ -10,6 +10,8 @@
 额外支持"只分析"和"只渲染"，见 scripts/run_track.py 的 --analyze-only / --render-from。
 """
 
+import os
+
 from src.analysis import (  # noqa: F401  (_clean_segment 对外保留，测试与旧调用方可能引用)
     AnalysisResult,
     FrameRecord,
@@ -19,8 +21,6 @@ from src.analysis import (  # noqa: F401  (_clean_segment 对外保留，测试�
     save_analysis,
 )
 from src.render import draw_frame, render_video  # noqa: F401
-
-import os
 
 
 def _summary(out_path, analysis, rendered_frames, analysis_json=None):
