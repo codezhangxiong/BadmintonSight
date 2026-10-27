@@ -1,54 +1,59 @@
-"""采集阶段：只做逐帧计算与记录，不做段处理、不画图、不写视频。
+"""采集阶段：纯感知，只记录"看到了什么"，不做任何跟踪决策。
 
 三段式结构中的第一段：
 
-    采集    analyze_video()      本文件：检测 → 关联 → 门控 → 平滑，逐帧记录
-    段处理  process_segments()   src/segments.py：离线切段 + RANSAC 清洗 + 写 CSV
+    采集    analyze_video()      本文件：检测 → 候选过滤 → 静态标记，逐帧记录候选
+    段处理  resolve_tracks()     src/segments.py：关联 + 预测 + 门控 + 平滑 + 切段 + 清洗
     渲染    render_video()       src/render.py：读原视频重放视觉层并写 mp4
 
-采集阶段只输出两样东西：
-- FrameRecord 列表（每帧的渲染快照 + 决策结果），供渲染与段处理使用；
-- <stem>.traj.csv（逐帧事件表，流式写出）。
+职责边界（重要）：
+- 采集阶段**不判断哪个候选是球、不做门控、不丢弃观测**，只把每帧的候选完整记录下来
+  （point / is_static / conf / area_ratio / aspect_ratio）。因此更换关联策略、门控阈值、
+  平滑方式、分段规则都不需要重跑 YOLO。
+- 决策链（关联→预测→门控→平滑→分段）全部在段处理阶段重放，见 src/segments.py。
 
-一致性约束（重要）：
-FrameRecord 必须记录**复刻原单遍渲染所需的全部数据**；分段所需的 (frame, event, smooth)
-也要完整，否则段处理无法离线重算出与旧版一致的段。回归验证方式：
-全片输出 mp4 与基线 MD5 逐字节比对、三个 CSV 与基线 SHA256 比对。
+为什么门控必须和关联/平滑一起移走：
+关联需要"历史轨迹"做预测（predict_linear），而历史轨迹只由"通过门控的观测"构成。
+如果把门控单独留在采集端，它就得依赖平滑状态、而平滑又依赖门控结果，形成环。
+所以正确的切分是：采集=感知（无状态），段处理=决策（有状态）。
 """
 
 import json
 import os
 import time
-from collections import deque
 from dataclasses import dataclass, field
 
 import cv2
-import numpy as np
 
 from src.detector import extract_shuttlecock_candidates
-from src.export import FrameRecorder
 from src.tracker import association
-from src.tracker.association import mark_static_candidates, select_best_candidate
-from src.tracker.predictor import dynamic_step_threshold, predict_linear
-from utils.common import distance
+from src.tracker.association import mark_static_candidates
 
-# 渲染阶段固定使用的历史点上限，必须与画图端 draw_fade_points(max_keep=30) 一致
+# 渲染阶段的历史点上限，必须与画图端 draw_fade_points(max_keep=30) 一致
 TRAIL_MAX_KEEP = 30
 
 
 @dataclass
 class FrameRecord:
-    """一帧的采集结果（渲染快照 + 决策），是段处理与渲染的唯一输入。"""
+    """一帧的采集结果 + 决策结果。
+
+    采集阶段只填 frame / raw_boxes / candidates；其余字段由段处理阶段（resolve_tracks）填充。
+    """
 
     frame: int
     raw_boxes: list = field(default_factory=list)  # [[cx,cy,bw,bh,conf], ...]
-    candidates: list = field(default_factory=list)  # [[x,y,is_static], ...]
+    # 候选：[x, y, is_static, confidence, area_ratio, aspect_ratio]
+    # 前 3 项供渲染使用，后 3 项供段处理重放关联代价计算（保持原始数值）
+    candidates: list = field(default_factory=list)
     chosen: list = None  # [x,y] 门控前选中的候选（被拒也会画黄点）
     rejected: bool = False
     smooth: list = None  # [x,y] 平滑点
     trail: list = field(default_factory=list)  # 该帧绘制用的历史点（最多 30 个）
     segment_id: int = None
     event: str = "miss"  # obs / rejected / miss
+    # 门控决策细节（段处理阶段填充；导出 traj.csv 的 dist_to_prev / threshold 列）
+    dist_to_prev: float = None
+    threshold: float = None
 
     def to_dict(self):
         return {
@@ -61,6 +66,8 @@ class FrameRecord:
             "trail": self.trail,
             "segment_id": self.segment_id,
             "event": self.event,
+            "dist_to_prev": self.dist_to_prev,
+            "threshold": self.threshold,
         }
 
     @classmethod
@@ -75,12 +82,14 @@ class FrameRecord:
             trail=data.get("trail") or [],
             segment_id=data.get("segment_id"),
             event=data.get("event", "miss"),
+            dist_to_prev=data.get("dist_to_prev"),
+            threshold=data.get("threshold"),
         )
 
 
 @dataclass
 class AnalysisResult:
-    """采集结果：逐帧快照 + 统计。segments 由段处理阶段填充。"""
+    """采集结果：逐帧候选 + 决策字段（段处理阶段填充）。"""
 
     video_path: str
     fps: float
@@ -164,34 +173,52 @@ def _collect_raw_boxes(boxes):
 
 
 def _collect_candidates(candidates):
-    """把候选点转成可序列化列表（渲染只需 point + is_static）。"""
-    return [
-        [int(cand["point"][0]), int(cand["point"][1]), bool(cand.get("is_static", False))]
-        for cand in candidates
-    ]
+    """记录候选中"感知 + 代价计算 + 导出"所需的全部字段。
+
+    每行 10 项：[x, y, is_static, confidence, area_ratio, aspect_ratio, x1, y1, x2, y2]
+    - 前 3 项供渲染使用；
+    - 中间 3 项供段处理重放关联代价计算；
+    - 后 4 项（bbox）供 traj.csv 导出。
+    段处理阶段要重放关联，因此必须把代价计算所需字段一起存下来，否则无法离线重算。
+    """
+    rows = []
+    for cand in candidates:
+        bbox = cand.get("bbox") or (0, 0, 0, 0)
+        rows.append(
+            [
+                int(cand["point"][0]),
+                int(cand["point"][1]),
+                bool(cand.get("is_static", False)),
+                float(cand["confidence"]),
+                float(cand["area_ratio"]),
+                float(cand["aspect_ratio"]),
+                int(bbox[0]),
+                int(bbox[1]),
+                int(bbox[2]),
+                int(bbox[3]),
+            ]
+        )
+    return rows
 
 
-def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose=True):
-    """第一遍扫描：逐帧采集，不写视频、不画图、不做段处理。
+def analyze_video(video_path, cfg, limit=None, verbose=True):
+    """第一遍扫描：只做检测与候选记录（无状态），不判断、不丢弃、不写 CSV。
 
     参数
     ----
     video_path  输入视频
-    out_path    最终输出 mp4 的路径（本阶段只用它的目录/主干命名 traj.csv）
     limit       只处理前 N 帧（调试用）
-    save_traj   是否写逐帧事件 CSV（traj.csv）
     verbose     是否打印逐帧日志与启动进度
 
-    返回 AnalysisResult（segments 为空，由 process_segments 填充）。
+    返回 AnalysisResult（决策字段为空，由 resolve_tracks 填充）。
     """
     # 延迟导入 ultralytics：它会连锁加载 torch 及 CUDA 动态库（本机实测约 2.2s）。
-    # 只有真正要跑检测时才需要这笔开销；--render-from 走渲染路径，不应为它付启动成本。
+    # 只有真正要跑检测时才需要这笔开销；只渲染/只重做段处理时不应付这笔启动成本。
     from ultralytics import YOLO
 
     t_start = time.perf_counter()
     if verbose:
-        # 进度提示走 stdout（数据输出本来就是逐帧日志；stderr 在 Windows PowerShell
-        # 下会被渲染成红色错误块，容易误解为报错）
+        # 进度提示走 stdout（Windows PowerShell 会把 stderr 渲染成红色错误块）
         print(f"[采集] 加载 YOLO 权重: {cfg['model_path']}", flush=True)
     model = YOLO(cfg["model_path"])
     if verbose:
@@ -217,26 +244,14 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
     # 模块级静态记忆是全局状态；每次采集都从空记忆开始，保证可复现
     association.static_candidate_memory.clear()
 
-    recorder = None
+    track_cfg = cfg["tracker"]
+    roi = [(50, 50), (w - 50, h - 50)]
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    processed = 0
+    frames = []
+
     try:
-        recorder = FrameRecorder(out_path, enabled=save_traj)
-
-        track_cfg = cfg["tracker"]
-        smooth_win = deque(maxlen=track_cfg["smooth_window_len"])
-        full_traj = []
-        missing = 0
-        MAX_MISS = track_cfg["max_miss"]
-        roi = [(50, 50), (w - 50, h - 50)]
-
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        processed = 0
-        accepted = 0
-        rejected = 0
-        missed = 0
-        segment_id = 0
-        active_segment_id = None
-        frames = []
-
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -248,11 +263,9 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
             results = model(frame, conf=cfg["detector"]["yolo_conf"], verbose=False)[0]
             if verbose and processed == 1:
                 print(
-                    f"[采集] 初始化完成（累计 {time.perf_counter() - t_start:.2f}s），开始逐帧处理",
+                    f"[采集] 初始化完成（累计 {time.perf_counter() - t_start:.2f}s），开始逐帧检测",
                     flush=True,
                 )
-
-            raw_boxes = _collect_raw_boxes(results.boxes)
 
             candidates = extract_shuttlecock_candidates(results.boxes, frame.shape, cfg, roi)
             candidates = mark_static_candidates(
@@ -262,90 +275,15 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
                 static_frame_count=track_cfg["static_frame_count"],
             )
 
-            ref_pt = predict_linear(full_traj, n_lookback=4)
-            best = select_best_candidate(candidates, ref_pt, full_traj, cfg)
-
-            record = FrameRecord(frame=fid, raw_boxes=raw_boxes)
-            smooth_pt = None
-            d = None
-            th = None
-            if best is not None:
-                obs_pt = best["point"]
-                record.chosen = [int(obs_pt[0]), int(obs_pt[1])]
-                outlier = False
-                if len(smooth_win) > 0:
-                    last_p = smooth_win[-1]
-                    d = distance(obs_pt, last_p)
-                    th = dynamic_step_threshold(
-                        full_traj,
-                        base_gain=track_cfg["dynamic_gain"],
-                        min_thresh=track_cfg["dynamic_min_thresh"],
-                        max_thresh=track_cfg["dynamic_max_thresh"],
-                    )
-                    if d > th:
-                        outlier = True
-                if outlier:
-                    missing += 1
-                    rejected += 1
-                    record.rejected = True
-                    record.event = "rejected"
-                    if verbose:
-                        print(f"[Frame {fid}] OBS {obs_pt} outlier drop")
-                    recorder.add_frame(
-                        fid,
-                        active_segment_id,
-                        "rejected",
-                        obs=obs_pt,
-                        candidate=best,
-                        dist_to_prev=d,
-                        threshold=th,
-                    )
-                else:
-                    missing = 0
-                    accepted += 1
-                    if active_segment_id is None:
-                        active_segment_id = segment_id
-                    smooth_win.append(np.array(obs_pt))
-                    arr = np.array(list(smooth_win))
-                    smooth_pt = tuple(np.mean(arr, axis=0))
-                    full_traj.append(smooth_pt)
-                    record.smooth = [float(smooth_pt[0]), float(smooth_pt[1])]
-                    record.event = "obs"
-                    if verbose:
-                        print(f"[Frame {fid}] obs {obs_pt}, smooth {np.round(smooth_pt, 1)}")
-                    recorder.add_frame(
-                        fid,
-                        active_segment_id,
-                        "obs",
-                        obs=obs_pt,
-                        smooth=smooth_pt,
-                        candidate=best,
-                        dist_to_prev=d,
-                        threshold=th,
-                    )
-            else:
-                missing += 1
-                missed += 1
-                record.event = "miss"
-                if verbose:
-                    print(f"[Frame {fid}] no obs, missing={missing}")
-                recorder.add_frame(fid, active_segment_id, "miss")
-
-            # 记录渲染快照：此时 full_traj 的状态与旧版 draw_fade_points 的输入完全一致
-            record.candidates = _collect_candidates(candidates)
-            record.trail = [[float(x), float(y)] for x, y in list(full_traj)[-TRAIL_MAX_KEEP:]]
-            record.segment_id = active_segment_id
-            frames.append(record)
-
-            if missing > MAX_MISS:
-                # 段结束：推进段号、清空平滑/轨迹缓冲（只影响后续帧的 segment_id 列；
-                # 真正的分段与清洗在 process_segments 里离线完成）
-                if full_traj:
-                    segment_id += 1
-                    active_segment_id = None
-                full_traj.clear()
-                smooth_win.clear()
-                missing = 0
+            frames.append(
+                FrameRecord(
+                    frame=fid,
+                    raw_boxes=_collect_raw_boxes(results.boxes),
+                    candidates=_collect_candidates(candidates),
+                )
+            )
+            if verbose:
+                print(f"[采集] Frame {fid}: 候选 {len(candidates)} 个")
 
         return AnalysisResult(
             video_path=video_path,
@@ -354,15 +292,13 @@ def analyze_video(video_path, cfg, out_path, limit=None, save_traj=True, verbose
             height=h,
             total_frames=total_frames,
             processed=processed,
-            accepted=accepted,
-            rejected=rejected,
-            miss=missed,
+            accepted=0,
+            rejected=0,
+            miss=0,
             segments=[],
             frames=frames,
-            csv=recorder.summary(),
+            csv={},
             limit=limit,
         )
     finally:
-        if recorder is not None:
-            recorder.close()
         cap.release()

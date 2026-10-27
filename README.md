@@ -42,7 +42,7 @@ python scripts/run_track.py --video videos/badminton.mp4 --weights weights/yolo1
 # ① 只采集 + 段处理：产出 3 个 CSV + analysis.json，不生成视频（约 18s）
 python scripts/run_track.py --video videos/badminton.mp4 --weights weights/yolo11s-ball.pt \
     --output outputs/run.mp4 --analyze-only --no-gui
-# ② 只重做段处理：调 max_miss / ransac 参数后重算分段与清洗（约 0.5s，不加载 YOLO）
+# ② 只重做段处理：调门控阈值 / max_miss / ransac 参数后重算决策与分段（约 0.6s，不加载 YOLO）
 python scripts/run_track.py --segments-from outputs/run.analysis.json \
     --output outputs/run.mp4 --config configs/track_cfg.yaml
 # ③ 只渲染：复用 analysis.json 重放视觉层（约 24s，不加载 YOLO）
@@ -54,11 +54,11 @@ python scripts/run_track.py --video videos/badminton.mp4 \
 
 | 阶段 | 模块 | 做什么 | 产物 |
 |---|---|---|---|
-| 采集 | `src/analysis.py` `analyze_video()` | 逐帧 YOLO 检测、候选/静态标记、关联、门控、平滑；只记录，不做段处理 | `traj.csv` + `AnalysisResult`（可存 JSON） |
-| 段处理 | `src/segments.py` `process_segments()` | 离线切段（连续丢帧规则）、RANSAC 清洗 | `segments.csv` + `clean.csv` |
+| 采集 | `src/analysis.py` `analyze_video()` | 逐帧 YOLO 检测、候选过滤、静态标记；**只记录每帧全部候选，不做跟踪决策** | `AnalysisResult`（可存 JSON） |
+| 段处理 | `src/segments.py` `resolve_tracks()` | 重放**关联 → 预测 → 门控 → 平滑**，再切段（连续丢帧规则）、RANSAC 清洗 | `traj.csv` + `segments.csv` + `clean.csv` |
 | 渲染 | `src/render.py` `render_video()` | 只按帧快照重放视觉层并写 mp4 | 视频 |
 
-好处：段处理只依赖采集结果，**调分段/清洗参数不必重跑 YOLO**（实测 0.49s 重算全片分段）；改渲染（配色、标注、慢动作）同样只需重跑渲染阶段；后续接入 Kalman/批优化时，可以在段处理阶段做回溯优化而不动采集循环。
+好处：**跟踪决策（含门控）全部在段处理阶段**。采集结果里存了每帧全部候选，因此调门控阈值、`max_miss`、RANSAC 参数、甚至更换关联策略都**不必重跑 YOLO**（实测 0.6s 重算全片决策与分段；把 `max_miss` 从 5 改成 2 只需 0.63s，段数 15→21）；改渲染（配色、标注、慢动作）同样只需重跑渲染阶段；后续接入 Kalman/批优化时，可以在段处理阶段替换"预测+门控+平滑"，采集与渲染都不用动。
 
 启动耗时：首次跑检测约 **5 秒**才出第一帧（`import torch` 装载 CUDA 库约 2.2s + 首次 CUDA/cuDNN 初始化约 2.4s，与权重大小无关），期间会打印 `[采集] ...` 进度提示。`--render-from` / `--segments-from` 都**不加载 YOLO**，启动约 0.2 秒。
 
@@ -76,7 +76,7 @@ python scripts/run_track.py --video videos/badminton.mp4 \
 | `--no-traj` | 关 | 不写轨迹 CSV |
 | `--limit` | 全部 | 只处理前 N 帧 |
 | `--analyze-only` | 关 | 只跑采集 + 段处理，写 CSV + analysis.json |
-| `--segments-from` | 空 | 从 analysis.json 重做段处理（只写 CSV，跳过 YOLO） |
+| `--segments-from` | 空 | 从 analysis.json 重做跟踪决策 + 分段（只写 CSV，跳过 YOLO） |
 | `--render-from` | 空 | 从已有 analysis.json 渲染（跳过 YOLO） |
 | `--analysis-json` | 空 | 另存分析结果 JSON；`--analyze-only` 默认 `<输出主干>.analysis.json` |
 

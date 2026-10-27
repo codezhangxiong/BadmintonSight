@@ -42,11 +42,13 @@ def draw_frame(frame, record):
     _draw_raw_boxes(frame, record.raw_boxes)
 
     # 候选点：draw_candidates 需要 dict 形式的候选（point + is_static）
+    # 采集记录的每行是 [x, y, is_static, conf, area_ratio, aspect_ratio, x1, y1, x2, y2]，
+    # 渲染只取前 3 项（兼容只有 3 项的旧格式）。
     draw_candidates(
         frame,
         [
-            {"point": (int(x), int(y)), "is_static": bool(is_static)}
-            for x, y, is_static in record.candidates
+            {"point": (int(row[0]), int(row[1])), "is_static": bool(row[2])}
+            for row in record.candidates
         ],
     )
 
