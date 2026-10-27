@@ -51,6 +51,9 @@ class FrameRecord:
     # 门控决策细节（段处理阶段填充；导出 traj.csv 的 dist_to_prev / threshold 列）
     dist_to_prev: float = None
     threshold: float = None
+    # 门控判定来源与运动模型残差（段处理阶段填充；写入 capture.json 供调试）
+    gate_reason: str = None
+    gate_residual: float = None
 
     def to_dict(self):
         return {
@@ -65,6 +68,8 @@ class FrameRecord:
             "event": self.event,
             "dist_to_prev": self.dist_to_prev,
             "threshold": self.threshold,
+            "gate_reason": self.gate_reason,
+            "gate_residual": self.gate_residual,
         }
 
     @classmethod
@@ -81,6 +86,8 @@ class FrameRecord:
             event=data.get("event", "miss"),
             dist_to_prev=data.get("dist_to_prev"),
             threshold=data.get("threshold"),
+            gate_reason=data.get("gate_reason"),
+            gate_residual=data.get("gate_residual"),
         )
 
 

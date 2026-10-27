@@ -8,8 +8,15 @@ tracker:
   lambda_fast: 0.65
   grid_size: 10
   dynamic_gain: 2.0
-  dynamic_min_thresh: 60.0
+  dynamic_min_thresh: 200.0
   dynamic_max_thresh: 320.0
+  motion_model:
+    enabled: true
+    window: 6              # 拟合窗口：最近 N 个已接受观测
+    min_points: 5          # 至少这么多点才做二次拟合（3 参数 + 冗余）
+    residual_thresh: 80.0  # 候选到二次曲线预测位置的残差阈值（px）；实测正常球 p90=54/p95=90
+    rms_thresh: 20.0       # 窗口自身拟合 RMS 阈值（px），超过视为跨越击球点
+    reverse_cos: -0.2      # 方向反转判定：cos(预测速度, 实测位移) 小于该值视为击球
 
 ransac:
   min_samples: 5

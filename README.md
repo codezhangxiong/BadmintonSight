@@ -137,12 +137,19 @@ python -m unittest discover -s tests -t .
 
 ## 配置
 
-`configs/track_cfg.yaml` 分三组：`tracker`（平滑/关联/门控/阈值）、`ransac`（抛物线清洗）、`detector`（检测置信度）。候选提取不再做外形（面积/长宽比）与 ROI 过滤——实测这两类门控在本数据上从未触发，已删除。参数含义与实测灵敏度见 `docs/PROJECT_ANALYSIS.md` §3、§5。
+`configs/track_cfg.yaml` 分三组：`tracker`（平滑/关联/**门控**/阈值）、`ransac`（抛物线清洗）、`detector`（检测置信度）。
+
+**门控**由 `src/tracker/gating.py` 提供，串联两道（任何一道拒绝即丢弃该帧观测）：
+1. `DistanceGate`：观测到上一个平滑点的距离超过动态阈值（`dynamic_gain/min/max_thresh`）。
+2. `MotionModelGate`：对最近 `window`（默认 6）个已接受观测按时间分别拟合 `x(t)`、`y(t)` 二次曲线，外推当前帧，**残差 > `residual_thresh`（默认 80px）即拒绝**。击球/折返时（窗口拟合 RMS 过大，或残差大但方向反转）**重置拟合窗口并放行**，避免误杀击球点。参数在 `tracker.motion_model` 下。
+
+候选提取不做外形（面积/长宽比）与 ROI 过滤——实测这两类门控在本数据上从未触发，已删除。
 
 ## 已知限制
 
 - 关联仍是单目标启发式：代价函数量纲失配，实际近似最近邻；λ 自适应分支在 50fps 素材上不会触发。
-- 离群门控基于平滑点计速，阈值实际退化为常数 60px，实测约 20% 帧的观测被丢弃。
-- 抛物线清洗假设 `y=f(x)`，对左右往返的整段轨迹不成立（保留率可低至 44%）。
+- 距离门控的 `dynamic_gain` / `dynamic_max_thresh` 实测无效（阈值几乎总贴 `dynamic_min_thresh`，当前取 200px，依据见下）。
+- 运动模型门的残差阈值（80px）基于本机数据统计：正常接受帧残差 p50=1.6 / p90=54 / p95=90px；30px 会误杀、150px 接近失效。
+- 抛物线清洗假设 `y=f(x)`，对左右往返的整段轨迹不成立；门控放宽后段变长，清洗保留率进一步下降（当前约 40~90% 不等），`clean.csv` 需谨慎使用。
 - 单目标、无轨迹 ID、无球员/球场坐标、无击球事件。
 - 详细数据与改进优先级见 `docs/PROJECT_ANALYSIS.md` §5、§8。

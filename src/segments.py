@@ -25,8 +25,8 @@ import numpy as np
 from src.export import TrajectoryRecorder
 from src.tracker.association import select_best_candidate
 from src.tracker.cleaner import ransac_clean_parabola
-from src.tracker.predictor import dynamic_step_threshold, predict_linear
-from utils.common import distance
+from src.tracker.gating import GatingChain
+from src.tracker.predictor import predict_linear
 
 # 渲染阶段的历史点上限，必须与画图端 draw_fade_points(max_keep=30) 一致
 TRAIL_MAX_KEEP = 30
@@ -105,11 +105,15 @@ def _build_segment(segment_id, current, ransac_cfg):
 
 
 # --------------------------------------------------------------------------- 决策重放
+def _num(value):
+    return "-" if value is None else f"{value:.1f}"
+
+
 def replay_decisions(frames, cfg, verbose=True):
     """重放关联 → 预测 → 门控 → 平滑，把决策结果写回 FrameRecord。
 
-    这是原采集循环里"决策部分"的等价实现（旧版逻辑逐行保留），区别只是
-    观测输入来自 frames 里已记录的候选，而不是现场跑 YOLO。
+    门控本身已拆到 `src/tracker/gating.py`（距离门 + 运动模型门），本函数只负责
+    驱动状态机：关联选点、调用门控、接受时更新平滑/轨迹缓冲、维护段结束。
 
     返回统计 dict：accepted / rejected / miss。
     """
@@ -121,6 +125,7 @@ def replay_decisions(frames, cfg, verbose=True):
     accepted = 0
     rejected = 0
     missed = 0
+    gate = GatingChain(track_cfg)
 
     for record in frames:
         candidates = [_candidate_dict(row) for row in record.candidates]
@@ -130,29 +135,23 @@ def replay_decisions(frames, cfg, verbose=True):
         if best is not None:
             obs_pt = best["point"]
             record.chosen = [int(obs_pt[0]), int(obs_pt[1])]
-            outlier = False
-            d = None
-            th = None
-            if len(smooth_win) > 0:
-                last_p = smooth_win[-1]
-                d = distance(obs_pt, last_p)
-                th = dynamic_step_threshold(
-                    full_traj,
-                    base_gain=track_cfg["dynamic_gain"],
-                    min_thresh=track_cfg["dynamic_min_thresh"],
-                    max_thresh=track_cfg["dynamic_max_thresh"],
-                )
-                if d > th:
-                    outlier = True
-            record.dist_to_prev = d
-            record.threshold = th
-            if outlier:
+            last_p = smooth_win[-1] if len(smooth_win) > 0 else None
+            decision = gate.evaluate(obs_pt, record.frame, last_p, full_traj)
+            record.dist_to_prev = decision.distance
+            record.threshold = decision.distance_thresh
+            record.gate_reason = decision.reason
+            record.gate_residual = decision.residual
+            if not decision.accepted:
                 missing += 1
                 rejected += 1
                 record.rejected = True
                 record.event = "rejected"
                 if verbose:
-                    print(f"[Frame {record.frame}] OBS {obs_pt} outlier drop")
+                    print(
+                        f"[Frame {record.frame}] OBS {obs_pt} rejected({decision.reason}) "
+                        f"d={_num(decision.distance)} th={_num(decision.distance_thresh)} "
+                        f"res={_num(decision.residual)}"
+                    )
             else:
                 missing = 0
                 accepted += 1
@@ -161,8 +160,13 @@ def replay_decisions(frames, cfg, verbose=True):
                 full_traj.append(smooth_pt)
                 record.smooth = [float(smooth_pt[0]), float(smooth_pt[1])]
                 record.event = "obs"
+                gate.accept(obs_pt, record.frame)
                 if verbose:
-                    print(f"[Frame {record.frame}] obs {obs_pt}, smooth {np.round(smooth_pt, 1)}")
+                    tag = f" [{decision.reason}]" if decision.motion_reset else ""
+                    print(
+                        f"[Frame {record.frame}] obs {obs_pt}, "
+                        f"smooth {np.round(smooth_pt, 1)}{tag}"
+                    )
         else:
             missing += 1
             missed += 1
@@ -173,10 +177,11 @@ def replay_decisions(frames, cfg, verbose=True):
         record.trail = [[float(x), float(y)] for x, y in list(full_traj)[-TRAIL_MAX_KEEP:]]
 
         if missing > MAX_MISS:
-            # 段结束：清空平滑/轨迹缓冲（分段与清洗在 collect_segments 里做）
+            # 段结束：清空平滑/轨迹缓冲与门控窗口（分段与清洗在 collect_segments 里做）
             full_traj.clear()
             smooth_win.clear()
             missing = 0
+            gate.reset()
 
     return {"accepted": accepted, "rejected": rejected, "miss": missed}
 
