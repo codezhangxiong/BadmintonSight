@@ -242,7 +242,6 @@ def capture_video(video_path, cfg, limit=None, verbose=True):
     association.static_candidate_memory.clear()
 
     track_cfg = cfg["tracker"]
-    roi = [(50, 50), (w - 50, h - 50)]
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     processed = 0
@@ -264,7 +263,7 @@ def capture_video(video_path, cfg, limit=None, verbose=True):
                     flush=True,
                 )
 
-            candidates = extract_shuttlecock_candidates(results.boxes, frame.shape, cfg, roi)
+            candidates = extract_shuttlecock_candidates(results.boxes, frame.shape, cfg)
             candidates = mark_static_candidates(
                 candidates,
                 fid,

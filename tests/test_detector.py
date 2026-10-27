@@ -11,14 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.detector import extract_shuttlecock_candidates  # noqa: E402
 
 FRAME_SHAPE = (720, 1280, 3)
-CFG = {
-    "detector": {
-        "conf_min": 0.12,
-        "max_box_area_ratio": 0.004,
-        "max_aspect_ratio": 4.0,
-        "roi_padding_ratio": 0.08,
-    }
-}
+CFG = {"detector": {"conf_min": 0.12}}
 
 
 class _FakeTensor:
@@ -85,26 +78,36 @@ class DetectorTest(unittest.TestCase):
         self.assertIsNone(extract_shuttlecock_candidates(boxes, FRAME_SHAPE, CFG)[0]["cls"])
 
     def test_filters_low_confidence(self):
+        """置信度下限是保留的唯一候选级门控。"""
         boxes = _FakeBoxes([[640.0, 360.0, 18.0, 18.0]], conf=[0.05])
         self.assertEqual(extract_shuttlecock_candidates(boxes, FRAME_SHAPE, CFG), [])
 
-    def test_filters_oversized_box(self):
+    def test_oversized_box_is_no_longer_filtered(self):
+        """已删除外形门控：大框不再被丢弃（改由关联/门控阶段处理）。"""
         boxes = _FakeBoxes([[640.0, 360.0, 200.0, 200.0]], conf=[0.9])
-        self.assertEqual(extract_shuttlecock_candidates(boxes, FRAME_SHAPE, CFG), [])
+        candidates = extract_shuttlecock_candidates(boxes, FRAME_SHAPE, CFG)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["point"], (640, 360))
 
-    def test_filters_extreme_aspect_ratio(self):
+    def test_extreme_aspect_ratio_is_no_longer_filtered(self):
+        """已删除外形门控：极端长宽比不再被丢弃。"""
         boxes = _FakeBoxes([[640.0, 360.0, 8.0, 40.0]], conf=[0.9])
-        self.assertEqual(extract_shuttlecock_candidates(boxes, FRAME_SHAPE, CFG), [])
+        candidates = extract_shuttlecock_candidates(boxes, FRAME_SHAPE, CFG)
+        self.assertEqual(len(candidates), 1)
 
-    def test_roi_filter_currently_accepts_everything(self):
-        """记录当前 ROI 语义的已知行为（外扩后覆盖整幅画面）。
-
-        这不是期望语义：ROI 过滤器实际失效，属分析报告 P1-11 的已知问题。
-        测试在此固定现状，等修 ROI 时应同步更新此用例。
-        """
-        corners = [(50, 50), (1230, 670)]
+    def test_position_is_no_longer_filtered(self):
+        """已删除 ROI 门控：画面边缘的点也是合法候选。"""
         boxes = _FakeBoxes([[2.0, 2.0, 18.0, 18.0]], conf=[0.9])
-        self.assertEqual(len(extract_shuttlecock_candidates(boxes, FRAME_SHAPE, CFG, corners)), 1)
+        candidates = extract_shuttlecock_candidates(boxes, FRAME_SHAPE, CFG)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["point"], (2, 2))
+
+    def test_area_and_aspect_are_kept_as_metadata(self):
+        """外形字段仍作为元数据返回（关联代价使用），只是不再用于过滤。"""
+        boxes = _FakeBoxes([[640.0, 360.0, 200.0, 200.0]], conf=[0.9])
+        candidate = extract_shuttlecock_candidates(boxes, FRAME_SHAPE, CFG)[0]
+        self.assertGreater(candidate["area_ratio"], 0)
+        self.assertAlmostEqual(candidate["aspect_ratio"], 1.0, places=3)
 
 
 if __name__ == "__main__":

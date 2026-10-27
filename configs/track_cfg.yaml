@@ -19,6 +19,3 @@ ransac:
 detector:
   conf_min: 0.12
   yolo_conf: 0.18
-  max_box_area_ratio: 0.004
-  max_aspect_ratio: 4.0
-  roi_padding_ratio: 0.08

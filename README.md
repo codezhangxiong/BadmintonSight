@@ -137,7 +137,7 @@ python -m unittest discover -s tests -t .
 
 ## 配置
 
-`configs/track_cfg.yaml` 分三组：`tracker`（平滑/关联/阈值）、`ransac`（抛物线清洗）、`detector`（候选过滤）。参数含义、实测灵敏度与已知失效项见 `docs/PROJECT_ANALYSIS.md` §3、§5。
+`configs/track_cfg.yaml` 分三组：`tracker`（平滑/关联/门控/阈值）、`ransac`（抛物线清洗）、`detector`（检测置信度）。候选提取不再做外形（面积/长宽比）与 ROI 过滤——实测这两类门控在本数据上从未触发，已删除。参数含义与实测灵敏度见 `docs/PROJECT_ANALYSIS.md` §3、§5。
 
 ## 已知限制
 

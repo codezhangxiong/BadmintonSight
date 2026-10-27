@@ -28,12 +28,7 @@ CFG = {
         "dynamic_max_thresh": 320.0,
     },
     "ransac": {"min_samples": 5, "max_iter": 80, "residual_thresh": 12},
-    "detector": {
-        "conf_min": 0.12,
-        "max_box_area_ratio": 0.004,
-        "max_aspect_ratio": 4.0,
-        "roi_padding_ratio": 0.08,
-    },
+    "detector": {"conf_min": 0.12},
 }
 TMP_ROOT = PROJECT_ROOT / ".tmp-tests"
 

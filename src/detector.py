@@ -25,7 +25,22 @@ def _safe_cls(cls_tensor, n):
     return arr if arr.shape[0] == n else None
 
 
-def extract_shuttlecock_candidates(yolo_boxes, frame_shape, cfg, roi_corners=None):
+def extract_shuttlecock_candidates(yolo_boxes, frame_shape, cfg):
+    """把 YOLO 检测框转成候选点。
+
+    保留的过滤：置信度下限（conf_min）、无效框保护（宽或高 <= 0）。
+    **已移除**的两类门控：
+    - **外形门控**（面积比 max_box_area_ratio、长宽比 max_aspect_ratio）：
+      本题权重输出的球框恒定约 18×18px，这两个阈值从未真正触发；
+      而且它们属于"训练分布假设"，换机位/分辨率或换权重时会误杀有效检测，
+      因此改为不做形状/尺寸过滤。
+    - **ROI 门控**：原先"画面内缩 50px 再按 ROI 尺寸外扩 8%"，外扩量（94px）
+      大于内缩量（50px），最终范围覆盖整幅画面，实际恒为真；且 ROI 硬编码在
+      调用方，无法配置。与其保留一个永远为真的开关，不如删除。
+
+    area_ratio / aspect_ratio 仍作为候选元数据返回（关联代价函数会用到），
+    但不再参与候选的接受/拒绝。
+    """
     boxes = yolo_boxes
     if boxes is None or boxes.xywh.shape[0] < 1:
         return []
@@ -44,25 +59,14 @@ def extract_shuttlecock_candidates(yolo_boxes, frame_shape, cfg, roi_corners=Non
             continue
         area_ratio = (bw * bh) / frame_area
         ar = max(bw / bh, bh / bw)
-        if area_ratio > det_cfg["max_box_area_ratio"] or ar > det_cfg["max_aspect_ratio"]:
-            continue
-        pt = (int(cx), int(cy))
-        in_roi = True
-        if roi_corners is not None:
-            (x1, y1), (x2, y2) = roi_corners
-            pad = int(max(x2 - x1, y2 - y1) * det_cfg["roi_padding_ratio"])
-            if not ((x1 - pad) <= pt[0] <= (x2 + pad) and (y1 - pad) <= pt[1] <= (y2 + pad)):
-                in_roi = False
-        if not in_roi:
-            continue
         candidates.append(
             {
-                "point": pt,
+                "point": (int(cx), int(cy)),
                 "confidence": float(conf),
-                # 保持基线类型（np.float32），不在热路径上引入未声明的类型变化
+                # 元数据：供关联代价使用；不再用于过滤
                 "area_ratio": area_ratio,
                 "aspect_ratio": ar,
-                # 以下字段用于轨迹落盘与后续调试，不影响既有过滤/关联逻辑
+                # 以下字段用于轨迹落盘与后续调试
                 "bbox": (
                     int(cx - bw / 2),
                     int(cy - bh / 2),
