@@ -148,6 +148,7 @@ python -m unittest discover -s tests -t .
 | `yolo_conf` | YOLO 推理置信度阈值（`detector.yolo_conf`） | 传 `conf=0.0`，保留全部检测 | 是 |
 | `detector_conf` | 候选置信度下限（`detector.conf_min`） | 不再过滤低置信候选 | 是 |
 | `static_suppression` | 静态候选标记 + 120 惩罚 | 跳过 `mark_static_candidates` | 是 |
+| `association` | 关联层区分度裁决（`tracker.assoc_*`） | 退化为纯代价最小（旧行为） | 否（`--segments-from` 即可） |
 | `distance` | 距离门（`tracker.dynamic_*`） | 距离门放行全部观测 | 否（`--segments-from` 即可） |
 | `motion_model` | 运动模型门（`tracker.motion_model.*`） | 跳过二次曲线残差判定 | 否 |
 | `ransac` | 段后 RANSAC 清洗（`ransac.*`） | `n_cleaned == n_raw` | 否 |
@@ -156,11 +157,26 @@ python -m unittest discover -s tests -t .
 
 | 配置 | 接受 | 拒绝(距离/运动) | 段数 | clean 保留率 |
 |---|---|---|---|---|
-| 全开 | 655 | 56 (26/30) | 5 | 46.0% |
+| 全开 | 644 | 67 (25/42) | 7 | 52.5% |
+| `association` OFF（旧行为） | 655 | 56 (26/30) | 5 | 46.0% |
 | `distance` OFF | 668 | 43 (0/43) | 4 | 45.5% |
 | `motion_model` OFF | 691 | 20 (20/0) | 2 | 27.8% |
 | 两者 OFF | 711 | 0 / 0 | 1 | 23.8% |
-| `ransac` OFF | 655 | 56 | 5 | 100% |
+| `ransac` OFF | 644 | 67 | 7 | 100% |
+
+### 关联层（方案 C）
+
+`src/tracker/association.py::select_best_candidate` 在代价最小之外增加"区分度裁决"：
+
+- 当 top-1 与 top-2 的代价差 **< `tracker.assoc_margin`（默认 80）** 时，说明两个候选都说得通
+  （典型：球与反光点在两组位置交替出现，预测点落在两者之间），按顺序裁决：
+  1. **连续性优先**：次优候选到"上一个已接受观测"的距离若明显更近（近出 `assoc_cont_margin`，默认 30px），选它；
+  2. 距离接近时用**置信度**决胜；
+  3. 否则保持代价最小。
+- 可选 `tracker.assoc_max_dist > 0`：剔除离预测点超过该距离的候选；若全部超限则保留全部（不硬拒绝，避免快球误丢）。
+- **不要改成"conf 高者恒胜"**：实测高 conf 假阳性（球拍/反光点，conf≥0.8 但偏 100+px）会污染平滑窗口并引发连锁拒绝。
+
+实测（全片 730 帧）：交替跳变帧 **10 → 3**，接受 655→644、段数 5→7。
 
 ### 门控链
 
@@ -172,7 +188,7 @@ python -m unittest discover -s tests -t .
 
 ## 已知限制
 
-- 关联仍是单目标启发式：代价函数量纲失配，实际近似最近邻；λ 自适应分支在 50fps 素材上不会触发。
+- 关联仍是单目标启发式：代价函数量纲失配（conf 权重只有 1-λ≈0.15），已用"区分度裁决"补偿，但仍是启发式；λ 自适应分支在 50fps 素材上不会触发。
 - 距离门控的 `dynamic_gain` / `dynamic_max_thresh` 实测无效（阈值几乎总贴 `dynamic_min_thresh`，当前取 200px，依据见下）。
 - 运动模型门的残差阈值（80px）基于本机数据统计：正常接受帧残差 p50=1.6 / p90=54 / p95=90px；30px 会误杀、150px 接近失效。
 - 抛物线清洗假设 `y=f(x)`，对左右往返的整段轨迹不成立；门控放宽后段变长，清洗保留率进一步下降（当前约 40~90% 不等），`clean.csv` 需谨慎使用。

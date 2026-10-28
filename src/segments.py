@@ -132,12 +132,12 @@ def replay_decisions(frames, cfg, verbose=True):
     for record in frames:
         candidates = [_candidate_dict(row) for row in record.candidates]
         ref_pt = predict_linear(full_traj, n_lookback=4)
-        best = select_best_candidate(candidates, ref_pt, full_traj, cfg)
+        last_p = smooth_win[-1] if len(smooth_win) > 0 else None
+        best = select_best_candidate(candidates, ref_pt, full_traj, cfg, last_obs=last_p)
 
         if best is not None:
             obs_pt = best["point"]
             record.chosen = [int(obs_pt[0]), int(obs_pt[1])]
-            last_p = smooth_win[-1] if len(smooth_win) > 0 else None
             decision = gate.evaluate(obs_pt, record.frame, last_p, full_traj)
             record.dist_to_prev = decision.distance
             record.threshold = decision.distance_thresh

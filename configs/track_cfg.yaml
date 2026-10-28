@@ -4,6 +4,7 @@ gates:
   yolo_conf: true           # YOLO 推理置信度阈值（detector.yolo_conf）
   detector_conf: false      # 候选置信度下限（detector.conf_min；当前是死代码，默认关闭）
   static_suppression: true  # 静态候选标记与惩罚（tracker.grid_size / static_frame_count / static_penalty）
+  association: true         # 关联层：区分度不足时用置信度打破平局（方案 C）
   distance: true            # 距离门（tracker.dynamic_*）
   motion_model: true        # 运动模型门（tracker.motion_model.*）
   ransac: true              # 段后 RANSAC 清洗（ransac.*）
@@ -16,6 +17,9 @@ tracker:
   fast_speed_thresh: 100.0
   lambda_slow: 0.85
   lambda_fast: 0.65
+  assoc_margin: 80.0        # 关联区分度阈值：top1/top2 代价差小于它时进入裁决
+  assoc_cont_margin: 30.0   # 裁决的连续性容差(px)：次优候选到上一观测近这么多以上则改选它
+  assoc_max_dist: 0.0       # 关联候选最大距离（px）；0=不启用，>0 时剔除离预测点过远的候选
   grid_size: 10
   dynamic_gain: 2.0
   dynamic_min_thresh: 200.0
