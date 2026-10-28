@@ -61,17 +61,19 @@ def _chosen_candidate(record):
 
 
 # --------------------------------------------------------------------------- RANSAC 清洗
-def _clean_segment(points, frames, ransac_cfg):
+def _clean_segment(points, frames, ransac_cfg, enabled=True):
     """对一段轨迹做 RANSAC 清洗。
 
     返回 (cleaned_points, cleaned_frames, mask)。mask 与输入等长且保序，
     因此可以直接用布尔掩码把内点映射回原始帧号。
 
+    enabled=False（gates.ransac 关闭）时原样返回，n_cleaned == n_raw。
+
     点数 <= min_samples 的短段**不做清洗**：RANSAC 至少需要 min_samples 个点，
     对恰好等量的输入没有冗余度，可能把整段判成离群而清空（实测 5 点含 1 个离群 → 0 点）。
     短段按原样返回，保证 segments.csv 的 n_cleaned == n_raw 契约成立。
     """
-    if len(points) <= int(ransac_cfg["min_samples"]):
+    if not enabled or len(points) <= int(ransac_cfg["min_samples"]):
         return list(points), list(frames), np.ones(len(points), dtype=bool)
     cleaned, mask = ransac_clean_parabola(
         points,
@@ -84,11 +86,11 @@ def _clean_segment(points, frames, ransac_cfg):
     return cleaned, cleaned_frames, mask
 
 
-def _build_segment(segment_id, current, ransac_cfg):
+def _build_segment(segment_id, current, ransac_cfg, ransac_enabled=True):
     """把一段 (frame, point) 序列清洗成 segments 行 + 清洗后点。"""
     points = [point for _, point in current]
     frames = [frame for frame, _ in current]
-    cleaned, cleaned_frames, _ = _clean_segment(points, frames, ransac_cfg)
+    cleaned, cleaned_frames, _ = _clean_segment(points, frames, ransac_cfg, enabled=ransac_enabled)
     segment = {
         "segment_id": segment_id,
         # 起止帧取"实际有观测的帧"，与轨迹点范围一致，便于和视频帧对齐
@@ -125,7 +127,7 @@ def replay_decisions(frames, cfg, verbose=True):
     accepted = 0
     rejected = 0
     missed = 0
-    gate = GatingChain(track_cfg)
+    gate = GatingChain(track_cfg, cfg.get("gates"))
 
     for record in frames:
         candidates = [_candidate_dict(row) for row in record.candidates]
@@ -199,6 +201,7 @@ def collect_segments(frames, cfg):
     """
     max_miss = int(cfg["tracker"]["max_miss"])
     ransac_cfg = cfg["ransac"]
+    ransac_enabled = bool(cfg.get("gates", {}).get("ransac", True))
 
     segments = []
     clean_map = {}
@@ -212,7 +215,9 @@ def collect_segments(frames, cfg):
         if not current:
             active = None
             return
-        segment, cleaned, cleaned_frames = _build_segment(seg_id, current, ransac_cfg)
+        segment, cleaned, cleaned_frames = _build_segment(
+            seg_id, current, ransac_cfg, ransac_enabled=ransac_enabled
+        )
         segments.append(segment)
         clean_map[seg_id] = (cleaned, cleaned_frames)
         seg_id += 1

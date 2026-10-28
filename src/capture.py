@@ -248,6 +248,9 @@ def capture_video(video_path, cfg, limit=None, verbose=True):
     # 模块级静态记忆是全局状态；每次采集都从空记忆开始，保证可复现
     association.static_candidate_memory.clear()
 
+    gates = cfg.get("gates", {})
+    yolo_conf = cfg["detector"]["yolo_conf"] if gates.get("yolo_conf", True) else 0.0
+
     track_cfg = cfg["tracker"]
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -263,7 +266,7 @@ def capture_video(video_path, cfg, limit=None, verbose=True):
                 break
             processed += 1
             fid = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-            results = model(frame, conf=cfg["detector"]["yolo_conf"], verbose=False)[0]
+            results = model(frame, conf=yolo_conf, verbose=False)[0]
             if verbose and processed == 1:
                 print(
                     f"[采集] 初始化完成（累计 {time.perf_counter() - t_start:.2f}s），开始逐帧检测",
@@ -271,12 +274,13 @@ def capture_video(video_path, cfg, limit=None, verbose=True):
                 )
 
             candidates = extract_shuttlecock_candidates(results.boxes, frame.shape, cfg)
-            candidates = mark_static_candidates(
-                candidates,
-                fid,
-                grid_size=track_cfg["grid_size"],
-                static_frame_count=track_cfg["static_frame_count"],
-            )
+            if gates.get("static_suppression", True):
+                candidates = mark_static_candidates(
+                    candidates,
+                    fid,
+                    grid_size=track_cfg["grid_size"],
+                    static_frame_count=track_cfg["static_frame_count"],
+                )
 
             frames.append(
                 FrameRecord(

@@ -1,3 +1,13 @@
+# 门控开关：true = 启用该门（可能拒绝观测）；false = 关闭该门（该门放行全部观测）
+# 用途：消融实验。配合 --segments-from 可在约 1 秒内对比"开关前/后"的轨迹与统计。
+gates:
+  yolo_conf: true           # YOLO 推理置信度阈值（detector.yolo_conf）
+  detector_conf: false      # 候选置信度下限（detector.conf_min；当前是死代码，默认关闭）
+  static_suppression: true  # 静态候选标记与惩罚（tracker.grid_size / static_frame_count / static_penalty）
+  distance: true            # 距离门（tracker.dynamic_*）
+  motion_model: true        # 运动模型门（tracker.motion_model.*）
+  ransac: true              # 段后 RANSAC 清洗（ransac.*）
+
 tracker:
   smooth_window_len: 5
   max_miss: 5
@@ -25,4 +35,4 @@ ransac:
 
 detector:
   conf_min: 0.12
-  yolo_conf: 0.18
+  yolo_conf: 0.80

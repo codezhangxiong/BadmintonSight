@@ -102,7 +102,8 @@ class GateDecision:
 class DistanceGate:
     """距离门：到上一个平滑点的距离超过动态阈值 → 拒绝。"""
 
-    def __init__(self, tracker_cfg):
+    def __init__(self, tracker_cfg, enabled=True):
+        self.enabled = bool(enabled)
         self._cfg = {
             "base_gain": tracker_cfg.get("dynamic_gain", 2.0),
             "min_thresh": tracker_cfg.get("dynamic_min_thresh", 60.0),
@@ -110,7 +111,9 @@ class DistanceGate:
         }
 
     def evaluate(self, obs, smooth_last, full_traj):
-        """smooth_last 为 None（段内第一帧）时直接放行。"""
+        """smooth_last 为 None（段内第一帧）或门被关闭时直接放行。"""
+        if not self.enabled:
+            return GateDecision(True, "disabled")
         if smooth_last is None:
             return GateDecision(True, "ok")
         d = distance(obs, smooth_last)
@@ -197,11 +200,24 @@ class MotionModelGate:
 
 
 class GatingChain:
-    """门控链：距离门 → 运动模型门；任何一门拒绝即拒绝。"""
+    """门控链：距离门 → 运动模型门；任何一门拒绝即拒绝。
 
-    def __init__(self, tracker_cfg):
-        self.distance_gate = DistanceGate(tracker_cfg)
+    gates 是 config 里的开关字典（true=启用，false=关闭该门并放行全部观测）：
+        gates = {"distance": True, "motion_model": True}
+    motion_model 的开关优先级：gates.motion_model > tracker.motion_model.enabled。
+    """
+
+    def __init__(self, tracker_cfg, gates=None):
+        gates = gates or {}
+        self.gates = {
+            "distance": bool(gates.get("distance", True)),
+            "motion_model": bool(
+                gates.get("motion_model", (tracker_cfg.get("motion_model") or {}).get("enabled", True))
+            ),
+        }
+        self.distance_gate = DistanceGate(tracker_cfg, enabled=self.gates["distance"])
         self.motion_gate = MotionModelGate(tracker_cfg)
+        self.motion_gate.enabled = self.gates["motion_model"]
 
     def reset(self):
         self.motion_gate.reset()

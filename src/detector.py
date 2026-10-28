@@ -50,9 +50,10 @@ def extract_shuttlecock_candidates(yolo_boxes, frame_shape, cfg):
     h, w = frame_shape[:2]
     frame_area = max(1, h * w)
     det_cfg = cfg["detector"]
+    conf_min_enabled = cfg.get("gates", {}).get("detector_conf", True)
     candidates = []
     for i, (box, conf) in enumerate(zip(xywh, confs)):
-        if conf < det_cfg["conf_min"]:
+        if conf_min_enabled and conf < det_cfg["conf_min"]:
             continue
         cx, cy, bw, bh = box
         if bw <= 0 or bh <= 0:

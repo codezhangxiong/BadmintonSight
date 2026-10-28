@@ -137,7 +137,32 @@ python -m unittest discover -s tests -t .
 
 ## 配置
 
-`configs/track_cfg.yaml` 分三组：`tracker`（平滑/关联/**门控**/阈值）、`ransac`（抛物线清洗）、`detector`（检测置信度）。
+`configs/track_cfg.yaml` 分四块：`gates`（门控开关）、`tracker`（平滑/关联/门控参数/阈值）、`ransac`（抛物线清洗）、`detector`（检测置信度）。
+
+### 门控开关 `gates`
+
+每个门控都可以单独开关（`true`=启用、`false`=关闭并放行），用于消融实验：
+
+| 开关 | 控制什么 | 关闭后的行为 | 需要重跑 YOLO |
+|---|---|---|---|
+| `yolo_conf` | YOLO 推理置信度阈值（`detector.yolo_conf`） | 传 `conf=0.0`，保留全部检测 | 是 |
+| `detector_conf` | 候选置信度下限（`detector.conf_min`） | 不再过滤低置信候选 | 是 |
+| `static_suppression` | 静态候选标记 + 120 惩罚 | 跳过 `mark_static_candidates` | 是 |
+| `distance` | 距离门（`tracker.dynamic_*`） | 距离门放行全部观测 | 否（`--segments-from` 即可） |
+| `motion_model` | 运动模型门（`tracker.motion_model.*`） | 跳过二次曲线残差判定 | 否 |
+| `ransac` | 段后 RANSAC 清洗（`ransac.*`） | `n_cleaned == n_raw` | 否 |
+
+实测消融（固定采集结果，仅 replay 层门控）：
+
+| 配置 | 接受 | 拒绝(距离/运动) | 段数 | clean 保留率 |
+|---|---|---|---|---|
+| 全开 | 655 | 56 (26/30) | 5 | 46.0% |
+| `distance` OFF | 668 | 43 (0/43) | 4 | 45.5% |
+| `motion_model` OFF | 691 | 20 (20/0) | 2 | 27.8% |
+| 两者 OFF | 711 | 0 / 0 | 1 | 23.8% |
+| `ransac` OFF | 655 | 56 | 5 | 100% |
+
+### 门控链
 
 **门控**由 `src/tracker/gating.py` 提供，串联两道（任何一道拒绝即丢弃该帧观测）：
 1. `DistanceGate`：观测到上一个平滑点的距离超过动态阈值（`dynamic_gain/min/max_thresh`）。
