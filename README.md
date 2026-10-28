@@ -19,12 +19,26 @@ YOLO + MOT-style tracker for shuttlecock tracking.
 pip install -r requirements.txt
 ```
 
-需要自备两类大文件（均被 `.gitignore` 排除，不随仓库分发）：
+## 下载权重与演示视频
 
-| 位置 | 内容 |
-|---|---|
-| `weights/*.pt` | YOLO 权重；本项目使用 `weights/yolo11s-ball.pt`（单类 `badminton`） |
-| `videos/*.mp4` | 待处理视频；示例为 `videos/badminton.mp4`、`videos/badminton01.mp4` |
+本仓库**不把二进制素材放进 git**（保持克隆轻量），模型权重与示例视频通过 **GitHub Releases** 分发：
+
+| 文件 | 大小 | 放到 | SHA256 |
+|---|---|---|---|
+| [`yolo11s-ball.pt`](https://github.com/codezhangxiong/BadmintonSight/releases/download/v0.1.0-assets/yolo11s-ball.pt) | 18.3 MB | `weights/yolo11s-ball.pt` | `C21113960FADCE7F96B9F70F86802142482775405F60A9761328491868EDF31B` |
+| [`badminton.mp4`](https://github.com/codezhangxiong/BadmintonSight/releases/download/v0.1.0-assets/badminton.mp4) | 2.8 MB | `videos/badminton.mp4` | `435E42F42C27D1BEDE9B1690BA230386EB066FA2072188197B84F9AF5A2E87EE` |
+| [`badminton01.mp4`](https://github.com/codezhangxiong/BadmintonSight/releases/download/v0.1.0-assets/badminton01.mp4) | 8.4 MB | `videos/badminton01.mp4` | `390980C1A96400936F92E84821F6B0424B56712ACF6CB60772AC84C7D2205E99` |
+
+> 跑通默认示例只需要 `yolo11s-ball.pt` + `badminton.mp4`；`badminton01.mp4` 是备用素材。
+> 若 Release 尚未发布、或你使用了别的 tag，把链接里的 `v0.1.0-assets` 换成实际 tag，或直接到仓库 **Releases** 页面下载。
+
+下载后放到对应目录，并校验（PowerShell）：
+
+```powershell
+Get-FileHash weights\yolo11s-ball.pt, videos\badminton.mp4, videos\badminton01.mp4 -Algorithm SHA256
+```
+
+> 这些文件都被 `.gitignore` 排除，`git status` 里不会出现；`weights/`、`videos/` 目录需要自己创建。
 
 ## 运行
 
